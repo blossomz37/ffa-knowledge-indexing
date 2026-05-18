@@ -1,0 +1,1 @@
+@AGENTS.md is the authoritative source for information for and about agents.
