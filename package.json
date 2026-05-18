@@ -1,6 +1,6 @@
 {
     "name": "ffa-transcript-db",
-    "version": "2.3.6",
+    "version": "2.3.10",
     "main": "electron/main.cjs",
     "description": "FFA Transcript Database — search transcripts and Teachable course content",
     "type": "module",
@@ -16,11 +16,12 @@
         "dev:client": "npx vite",
         "start:electron": "electron electron/main.cjs",
         "dev:electron": "NODE_ENV=development electron electron/main.cjs",
-        "dist:electron:mac": "npm run build && electron-builder --mac --arm64",
-        "dist:electron:win": "npm run build && CSC_LINK= WIN_CSC_LINK= electron-builder --win --x64",
-        "dist:electron:linux": "npm run build && electron-builder --linux --x64",
-        "dist:electron:all": "npm run build && CSC_LINK= WIN_CSC_LINK= electron-builder --mac --win --linux",
-        "dist:electron": "npm run build && electron-builder"
+        "stage-puppeteer": "node scripts/stage-puppeteer.mjs",
+        "dist:electron:mac": "npm run build && npm run stage-puppeteer && electron-builder --mac --arm64",
+        "dist:electron:win": "npm run build && npm run stage-puppeteer && CSC_LINK= WIN_CSC_LINK= electron-builder --win --x64",
+        "dist:electron:linux": "npm run build && npm run stage-puppeteer && electron-builder --linux --x64",
+        "dist:electron:all": "npm run build && npm run stage-puppeteer && CSC_LINK= WIN_CSC_LINK= electron-builder --mac --win --linux",
+        "dist:electron": "npm run build && npm run stage-puppeteer && electron-builder"
     },
     "dependencies": {
         "better-sqlite3-multiple-ciphers": "^12.9.0",

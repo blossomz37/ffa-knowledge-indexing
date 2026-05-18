@@ -22,6 +22,9 @@ backup/
 # Local distribution builds
 _dist/
 
+# Staged Puppeteer Chromium for packaging (scripts/stage-puppeteer.mjs)
+.puppeteer-bundle/
+
 # OS files
 .DS_Store
 Thumbs.db

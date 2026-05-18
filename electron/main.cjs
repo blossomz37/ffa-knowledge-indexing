@@ -31,6 +31,24 @@ for (const p of EXTRA_PATH) {
 }
 process.env.PATH = pathParts.join(':');
 
+// Packaged builds bundle Puppeteer's Chromium under Resources/puppeteer-cache
+// (see electron-builder.yml extraResources). The full `puppeteer` package
+// resolves its pinned browser build from PUPPETEER_CACHE_DIR, so pointing that
+// at the bundled cache makes Teachable scraping / video archiving work without
+// the end user running `npx puppeteer browsers install`. In dev (not packaged)
+// we leave Puppeteer's default ~/.cache/puppeteer alone.
+if (app.isPackaged) {
+    const bundledPptrCache = path.join(process.resourcesPath, 'puppeteer-cache');
+    if (fs.existsSync(bundledPptrCache)) {
+        process.env.PUPPETEER_CACHE_DIR = bundledPptrCache;
+    } else {
+        console.warn(
+            `[electron] bundled Puppeteer cache missing at ${bundledPptrCache}; ` +
+            'scraping will fall back to a system Chrome install if present'
+        );
+    }
+}
+
 async function bootServer() {
     const userDataDir = app.getPath('userData');
     const dataDir = path.join(userDataDir, 'data');

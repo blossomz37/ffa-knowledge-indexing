@@ -22,6 +22,14 @@ asarUnpack:
 
 # Per-platform extraResources so each build only bundles its own Chromium
 # (avoid shipping linux+win Chromium inside the Mac .dmg, and vice versa).
+# Source is .puppeteer-bundle/chrome, staged by scripts/stage-puppeteer.mjs
+# (run from the dist:electron:* npm scripts) out of ~/.cache/puppeteer/chrome.
+# A relative `from:` is portable across machines/CI; a macro-expanded absolute
+# path is NOT (electron-builder treats it as project-relative and mangles it).
+# NOTE: a macOS build only has the mac_arm Chromium staged; producing working
+# win/linux bundles needs `npx puppeteer browsers install chrome` for those
+# platforms first. electron/main.cjs wires PUPPETEER_CACHE_DIR to the bundled
+# copy at runtime so packaged scraping works without a user-side install.
 mac:
   category: public.app-category.education
   target:
@@ -35,7 +43,7 @@ mac:
   gatekeeperAssess: false
   notarize: false
   extraResources:
-    - from: "/Users/wmiles49/.cache/puppeteer/chrome"
+    - from: ".puppeteer-bundle/chrome"
       to: "puppeteer-cache/chrome"
       filter:
         - "mac_arm-*/**/*"
@@ -56,7 +64,7 @@ win:
   # Users will see SmartScreen "unknown publisher" warning on first run.
   # Future: get an Authenticode cert (~$200/yr) and set 'sign:' here.
   extraResources:
-    - from: "/Users/wmiles49/.cache/puppeteer/chrome"
+    - from: ".puppeteer-bundle/chrome"
       to: "puppeteer-cache/chrome"
       filter:
         - "win64-*/**/*"
@@ -78,7 +86,7 @@ linux:
   # AppImages are sandbox-friendly executables. No signing needed; users mark
   # the .AppImage executable and double-click.
   extraResources:
-    - from: "/Users/wmiles49/.cache/puppeteer/chrome"
+    - from: ".puppeteer-bundle/chrome"
       to: "puppeteer-cache/chrome"
       filter:
         - "linux-*/**/*"
