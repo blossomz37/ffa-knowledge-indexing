@@ -5,21 +5,21 @@ Searchable database for Future Fiction Academy content — full-text search acro
 ## Installation (Electron desktop app)
 
 ### macOS (Apple Silicon)
-1. Download `FFA Transcript Database-2.3.0-arm64.dmg`
+1. Download `FFA Transcript Database-2.3.6-arm64.dmg`
 2. Open the `.dmg` and drag the app to `/Applications`
 3. First launch: right-click the app in `/Applications` → **Open** (Gatekeeper warning expected — signed but not yet notarized)
 4. Install `ffmpeg`: `brew install ffmpeg`
 
 ### Windows (x64)
-1. Download `FFA Transcript Database Setup 2.3.0.exe`
+1. Download `FFA Transcript Database Setup 2.3.6.exe`
 2. Double-click — SmartScreen warns "unknown publisher"
 3. Click **More info** → **Run anyway**
 4. Install ffmpeg: `choco install ffmpeg` (or [download from ffmpeg.org](https://ffmpeg.org/download.html) and add to PATH)
 
 ### Linux (x64)
-1. Download `FFA Transcript Database-2.3.0.AppImage`
-2. Make executable: `chmod +x "FFA Transcript Database-2.3.0.AppImage"`
-3. Run: `./FFA\ Transcript\ Database-2.3.0.AppImage`
+1. Download `FFA Transcript Database-2.3.6.AppImage`
+2. Make executable: `chmod +x "FFA Transcript Database-2.3.6.AppImage"`
+3. Run: `./FFA\ Transcript\ Database-2.3.6.AppImage`
 4. Install ffmpeg: `sudo apt install ffmpeg` (Debian/Ubuntu) or distro equivalent
 
 ### Known limitations
