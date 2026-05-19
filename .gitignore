@@ -12,6 +12,8 @@ data/transcripts.db-shm
 data/transcripts.db.bak
 data/cookies.json
 data/.dbkey
+data/pptr-profile/
+data/probe-pptr-profile/
 
 # Build output
 dist/
@@ -38,3 +40,4 @@ Thumbs.db
 
 # Local dev/run logs
 logs/
+tests/
