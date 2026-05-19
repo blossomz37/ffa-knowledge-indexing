@@ -1,5 +1,4 @@
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import puppeteer from 'puppeteer';
@@ -7,15 +6,19 @@ import puppeteer from 'puppeteer';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
 const linksPath = path.join(__dirname, 'test-links.md');
+const args = new Set(process.argv.slice(2));
+const loginMode = args.has('--login');
+const keepOpen = args.has('--keep-open');
 const dataDir = process.env.DATA_DIR
   ? path.resolve(process.env.DATA_DIR)
   : path.join(repoRoot, 'data');
 const cookiesPath = path.join(dataDir, 'cookies.json');
+const profileDir = path.join(dataDir, 'probe-pptr-profile');
 
 const runStamp = new Date().toISOString().replace(/[:.]/g, '-');
 const outDir = path.join(__dirname, 'scrape-output', runStamp);
 fs.mkdirSync(outDir, { recursive: true });
-const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffa-scrape-probe-'));
+fs.mkdirSync(profileDir, { recursive: true });
 
 function readLinks() {
   const content = fs.readFileSync(linksPath, 'utf8');
@@ -34,6 +37,19 @@ function loadCookies() {
   } catch {
     return [];
   }
+}
+
+function saveCookies(cookies) {
+  fs.mkdirSync(path.dirname(cookiesPath), { recursive: true });
+  fs.writeFileSync(cookiesPath, JSON.stringify(cookies, null, 2), { mode: 0o600 });
+}
+
+function isAuthenticated(cookies) {
+  return cookies.some(cookie => {
+    if (!cookie?.name) return false;
+    if (cookie.name === 'signed_in') return String(cookie.value) === 'true';
+    return cookie.name.includes('_remember_me');
+  });
 }
 
 function slugForUrl(url, index) {
@@ -75,6 +91,34 @@ async function launchBrowser() {
   } catch {
     return puppeteer.launch(opts);
   }
+}
+
+async function runLogin(browser) {
+  const page = await browser.newPage();
+  await page.goto('https://future-fiction-academy.teachable.com/sign_in', {
+    waitUntil: 'domcontentloaded',
+    timeout: 45_000,
+  }).catch(() => {});
+
+  console.log('Login browser opened. Complete Teachable login in the Chrome window.');
+  console.log('Waiting up to 5 minutes for an authenticated session...');
+
+  const started = Date.now();
+  const timeoutMs = 5 * 60 * 1000;
+  while (Date.now() - started < timeoutMs) {
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    const cookies = await page.cookies().catch(() => []);
+    if (isAuthenticated(cookies)) {
+      saveCookies(cookies);
+      console.log(`Authenticated session saved to ${cookiesPath}`);
+      if (!keepOpen) await page.close().catch(() => {});
+      return true;
+    }
+  }
+
+  console.log('Login timeout reached before authenticated cookies were detected.');
+  if (!keepOpen) await page.close().catch(() => {});
+  return false;
 }
 
 async function fetchTextDownloads(page, links) {
@@ -226,23 +270,31 @@ async function scrapePage(browser, url, index, cookies) {
 }
 
 const links = readLinks();
-const cookies = loadCookies();
+let cookies = loadCookies();
 const browser = await launchBrowser();
 const summaries = [];
 
 try {
+  if (loginMode) {
+    await runLogin(browser);
+    cookies = loadCookies();
+  }
   for (let i = 0; i < links.length; i++) {
     summaries.push(await scrapePage(browser, links[i], i, cookies));
   }
 } finally {
-  await browser.close().catch(() => {});
-  fs.rmSync(profileDir, { recursive: true, force: true });
+  if (keepOpen) {
+    console.log('Keeping browser open. Close the Chrome window when finished inspecting.');
+  } else {
+    await browser.close().catch(() => {});
+  }
 }
 
 fs.writeFileSync(path.join(outDir, 'summary.json'), JSON.stringify({
   runStamp,
   linksPath,
   outDir,
+  profileDir,
   cookieCount: cookies.length,
   totals: {
     urls: summaries.length,
@@ -259,6 +311,7 @@ const lines = [
   '',
   `Links: ${summaries.length}`,
   `Output: ${outDir}`,
+  `Profile: ${profileDir}`,
   `Cookies loaded: ${cookies.length}`,
   '',
   '| # | Status | Words | Chars | Downloads | Attachments | Title | URL |',
