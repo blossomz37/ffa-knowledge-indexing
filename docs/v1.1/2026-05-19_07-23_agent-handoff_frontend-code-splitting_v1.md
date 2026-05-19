@@ -31,6 +31,28 @@ ca373e8 Update .gitignore
 e89645b Add AI feature screenshots
 ```
 
+## Fork Baseline
+
+Carlo created the public v1.1 fork:
+
+```text
+https://github.com/blossomz37/ffa-knowledge-indexing
+```
+
+Local remote name:
+
+```text
+fork
+```
+
+The intended public baseline is `fork/main`. This baseline was created before starting the frontend code-splitting implementation so the fork has a stable checkpoint for all v1.1 AI knowledge, document import, docs, screenshots, README, and handoff work.
+
+Do not push to `origin`. If future work should be published, push explicit refs to `fork`, for example:
+
+```bash
+git push fork HEAD:main
+```
+
 Important layout:
 
 ```text
