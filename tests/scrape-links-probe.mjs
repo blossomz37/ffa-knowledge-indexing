@@ -9,6 +9,9 @@ const linksPath = path.join(__dirname, 'test-links.md');
 const args = new Set(process.argv.slice(2));
 const loginMode = args.has('--login');
 const keepOpen = args.has('--keep-open');
+const drillCourses = args.has('--drill-courses');
+const maxPagesArg = process.argv.slice(2).find(arg => arg.startsWith('--max-pages='));
+const maxPages = Math.max(1, Number(maxPagesArg?.split('=')[1] || 30));
 const dataDir = process.env.DATA_DIR
   ? path.resolve(process.env.DATA_DIR)
   : path.join(repoRoot, 'data');
@@ -73,6 +76,19 @@ function cleanText(text) {
 
 function countWords(text) {
   return cleanText(text).split(/\s+/).filter(Boolean).length;
+}
+
+function normalizeCoursePreviewUrl(href) {
+  try {
+    const url = new URL(href);
+    if (url.hostname !== 'future-fiction-academy.teachable.com') return null;
+    if (!url.pathname.includes('/courses/')) return null;
+    url.hash = '';
+    url.searchParams.set('preview', 'logged_in');
+    return url.href;
+  } catch {
+    return null;
+  }
 }
 
 async function launchBrowser() {
@@ -227,6 +243,11 @@ async function scrapePage(browser, url, index, cookies) {
   const words = countWords(bestText);
   const chars = bestText.length;
   const completedAt = new Date().toISOString();
+  const courseLinks = [...new Set(
+    (extracted.anchors || [])
+      .map(anchor => normalizeCoursePreviewUrl(anchor.href))
+      .filter(Boolean)
+  )];
 
   const summary = {
     index: index + 1,
@@ -245,6 +266,7 @@ async function scrapePage(browser, url, index, cookies) {
     bestWords: words,
     textDownloadCount: extracted.textDownloadLinks?.length || 0,
     notionLinkCount: extracted.notionLinks?.length || 0,
+    discoveredCourseLinkCount: courseLinks.length,
     iframeCount: extracted.iframes?.length || 0,
     attachmentCount: extracted.attachmentBlocks?.length || 0,
     fedoraPreview: extracted.fedoraPreview || null,
@@ -260,27 +282,45 @@ async function scrapePage(browser, url, index, cookies) {
     downloads: downloads.map(d => ({ ...d, text: undefined })),
     textDownloadLinks: extracted.textDownloadLinks || [],
     notionLinks: extracted.notionLinks || [],
+    courseLinks,
     iframes: extracted.iframes || [],
     attachmentBlocks: extracted.attachmentBlocks || [],
     anchorSample: (extracted.anchors || []).slice(0, 80),
   }, null, 2), 'utf8');
   await page.screenshot({ path: path.join(outDir, `${slug}.png`), fullPage: true }).catch(() => {});
   await page.close().catch(() => {});
-  return summary;
+  return { summary, courseLinks };
 }
 
-const links = readLinks();
+const seedLinks = readLinks();
 let cookies = loadCookies();
 const browser = await launchBrowser();
 const summaries = [];
+const queued = [...seedLinks];
+const seen = new Set();
+const discovered = [];
 
 try {
   if (loginMode) {
     await runLogin(browser);
     cookies = loadCookies();
   }
-  for (let i = 0; i < links.length; i++) {
-    summaries.push(await scrapePage(browser, links[i], i, cookies));
+  for (let i = 0; i < queued.length && summaries.length < maxPages; i++) {
+    const currentUrl = queued[i];
+    const normalizedSeenKey = normalizeCoursePreviewUrl(currentUrl) || currentUrl;
+    if (seen.has(normalizedSeenKey)) continue;
+    seen.add(normalizedSeenKey);
+
+    const { summary, courseLinks } = await scrapePage(browser, currentUrl, summaries.length, cookies);
+    summaries.push(summary);
+
+    if (drillCourses) {
+      for (const courseLink of courseLinks) {
+        if (seen.has(courseLink) || queued.includes(courseLink)) continue;
+        queued.push(courseLink);
+        discovered.push({ from: summary.finalUrl, url: courseLink });
+      }
+    }
   }
 } finally {
   if (keepOpen) {
@@ -296,14 +336,20 @@ fs.writeFileSync(path.join(outDir, 'summary.json'), JSON.stringify({
   outDir,
   profileDir,
   cookieCount: cookies.length,
+  options: {
+    drillCourses,
+    maxPages,
+  },
   totals: {
     urls: summaries.length,
     bestChars: summaries.reduce((sum, s) => sum + s.bestChars, 0),
     bestWords: summaries.reduce((sum, s) => sum + s.bestWords, 0),
     textDownloads: summaries.reduce((sum, s) => sum + s.textDownloadCount, 0),
     attachments: summaries.reduce((sum, s) => sum + s.attachmentCount, 0),
+    discoveredCourseLinks: summaries.reduce((sum, s) => sum + s.discoveredCourseLinkCount, 0),
   },
   pages: summaries,
+  discovered,
 }, null, 2), 'utf8');
 
 const lines = [
@@ -313,16 +359,18 @@ const lines = [
   `Output: ${outDir}`,
   `Profile: ${profileDir}`,
   `Cookies loaded: ${cookies.length}`,
+  `Drill course links: ${drillCourses ? `yes, max ${maxPages} pages` : 'no'}`,
   '',
-  '| # | Status | Words | Chars | Downloads | Attachments | Title | URL |',
-  '|---:|---:|---:|---:|---:|---:|---|---|',
-  ...summaries.map(s => `| ${s.index} | ${s.responseStatus ?? ''}${s.error ? ' error' : ''} | ${s.bestWords} | ${s.bestChars} | ${s.textDownloadCount} | ${s.attachmentCount} | ${s.title.replace(/\|/g, '\\|')} | ${s.finalUrl} |`),
+  '| # | Status | Words | Chars | Downloads | Attachments | Course Links | Title | URL |',
+  '|---:|---:|---:|---:|---:|---:|---:|---|---|',
+  ...summaries.map(s => `| ${s.index} | ${s.responseStatus ?? ''}${s.error ? ' error' : ''} | ${s.bestWords} | ${s.bestChars} | ${s.textDownloadCount} | ${s.attachmentCount} | ${s.discoveredCourseLinkCount} | ${s.title.replace(/\|/g, '\\|')} | ${s.finalUrl} |`),
   '',
   '## Notes',
   '',
   '- `best` text uses downloaded `.txt` transcript content when available; otherwise it uses visible page text.',
   '- Each URL has `.txt`, `.json`, and `.png` artifacts in this folder.',
+  '- `--drill-courses` queues discovered same-site Teachable links whose path contains `/courses/`, normalized with `preview=logged_in`.',
 ];
 fs.writeFileSync(path.join(outDir, 'README.md'), lines.join('\n'), 'utf8');
 
-console.log(JSON.stringify({ outDir, summaries }, null, 2));
+console.log(JSON.stringify({ outDir, summaries, discovered }, null, 2));
