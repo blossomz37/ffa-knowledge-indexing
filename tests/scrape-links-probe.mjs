@@ -199,7 +199,6 @@ async function scrapePage(browser, url, index, cookies) {
       href: a.href,
       text: (a.innerText || a.textContent || '').trim(),
     }));
-    const iframes = [...document.querySelectorAll('iframe[src]')].map(f => f.src);
     const textDownloadLinks = anchors
       .map(a => a.href)
       .filter(href => /\.txt(?:$|\?)/i.test(href));
@@ -210,8 +209,6 @@ async function scrapePage(browser, url, index, cookies) {
       index: i,
       className: el.className || '',
       text: (el.innerText || '').trim().slice(0, 2000),
-      links: [...el.querySelectorAll('a[href]')].map(a => a.href),
-      iframes: [...el.querySelectorAll('iframe[src]')].map(f => f.src),
     }));
     return {
       title,
@@ -221,7 +218,6 @@ async function scrapePage(browser, url, index, cookies) {
       fedoraCourseId: fedora?.getAttribute('data-course-id') || null,
       hasSigninForm: !!document.querySelector('form[action*="sign_in"], input[type="password"]'),
       anchors,
-      iframes,
       textDownloadLinks,
       notionLinks,
       attachmentBlocks,
@@ -232,7 +228,6 @@ async function scrapePage(browser, url, index, cookies) {
     bodyText: '',
     evalError: err.message,
     anchors: [],
-    iframes: [],
     textDownloadLinks: [],
     notionLinks: [],
     attachmentBlocks: [],
@@ -269,7 +264,6 @@ async function scrapePage(browser, url, index, cookies) {
     textDownloadCount: extracted.textDownloadLinks?.length || 0,
     notionLinkCount: extracted.notionLinks?.length || 0,
     discoveredCourseLinkCount: courseLinks.length,
-    iframeCount: extracted.iframes?.length || 0,
     attachmentCount: extracted.attachmentBlocks?.length || 0,
     fedoraPreview: extracted.fedoraPreview || null,
     fedoraCourseId: extracted.fedoraCourseId || null,
@@ -285,9 +279,7 @@ async function scrapePage(browser, url, index, cookies) {
     textDownloadLinks: extracted.textDownloadLinks || [],
     notionLinks: extracted.notionLinks || [],
     courseLinks,
-    iframes: extracted.iframes || [],
     attachmentBlocks: extracted.attachmentBlocks || [],
-    anchorSample: (extracted.anchors || []).slice(0, 80),
   }, null, 2), 'utf8');
   await page.screenshot({ path: path.join(outDir, `${slug}.png`), fullPage: true }).catch(() => {});
   await page.close().catch(() => {});
