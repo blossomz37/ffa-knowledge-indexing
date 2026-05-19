@@ -48,7 +48,9 @@ Searchable database for Future Fiction Academy content — full-text search acro
 Type anything into the search bar. Results appear automatically, with matched terms highlighted. Uses SQLite FTS5 with a Porter stemmer — "publish" matches "published", "publishing", etc.
 
 ### AI Search (Optional)
-Toggle **✨ AI** in the search bar to ask natural-language questions. The app retrieves the most relevant transcript chunks and sends them to an AI model via OpenRouter, which streams back a synthesized answer with citations. Press `Enter` to submit; requires an OpenRouter API key and a selected model.
+Toggle **✨ AI** in the search bar to ask natural-language questions. The app retrieves the most relevant transcript and course chunks using a hybrid of SQLite full-text search plus cached semantic embeddings, then sends that context to an AI model via OpenRouter for a streamed answer with citations. Press `Enter` to submit; requires an OpenRouter API key and a selected model.
+
+Use **Settings → Semantic Index → Index docs**, **Index current course**, or **Build full index** to generate the local embedding cache. The cache is stored in the encrypted SQLite database and uses `openai/text-embedding-3-small` through OpenRouter by default, or `OPENROUTER_EMBEDDING_MODEL` if set.
 
 ### File-Explorer Sidebar
 Courses and transcript sources are organized in a collapsible tree, not flat dropdowns:

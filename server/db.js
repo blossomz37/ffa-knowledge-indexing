@@ -261,6 +261,72 @@ export function initializeDb() {
     CREATE INDEX IF NOT EXISTS idx_course_chunks_lecture ON course_chunks(lecture_id);
 
     -- ==========================================================================
+    -- Local Library Documents
+    -- ==========================================================================
+
+    CREATE TABLE IF NOT EXISTS library_documents (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      file_path TEXT NOT NULL UNIQUE,
+      description TEXT,
+      source_url TEXT,
+      content_hash TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS library_document_chunks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      document_id INTEGER NOT NULL,
+      chunk_index INTEGER NOT NULL,
+      content TEXT NOT NULL,
+      FOREIGN KEY (document_id) REFERENCES library_documents(id) ON DELETE CASCADE
+    );
+
+    CREATE VIRTUAL TABLE IF NOT EXISTS library_document_chunks_fts USING fts5(
+      content,
+      content='library_document_chunks',
+      content_rowid='id',
+      tokenize='porter unicode61'
+    );
+
+    CREATE TRIGGER IF NOT EXISTS ldc_ai AFTER INSERT ON library_document_chunks BEGIN
+      INSERT INTO library_document_chunks_fts(rowid, content) VALUES (new.id, new.content);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS ldc_ad AFTER DELETE ON library_document_chunks BEGIN
+      INSERT INTO library_document_chunks_fts(library_document_chunks_fts, rowid, content) VALUES('delete', old.id, old.content);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS ldc_au AFTER UPDATE ON library_document_chunks BEGIN
+      INSERT INTO library_document_chunks_fts(library_document_chunks_fts, rowid, content) VALUES('delete', old.id, old.content);
+      INSERT INTO library_document_chunks_fts(rowid, content) VALUES (new.id, new.content);
+    END;
+
+    CREATE INDEX IF NOT EXISTS idx_library_document_chunks_doc
+      ON library_document_chunks(document_id);
+
+    -- ==========================================================================
+    -- Semantic Search Cache
+    -- ==========================================================================
+
+    CREATE TABLE IF NOT EXISTS semantic_embeddings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      content_type TEXT NOT NULL CHECK(content_type IN ('transcript','course','document')),
+      chunk_id INTEGER NOT NULL,
+      model TEXT NOT NULL,
+      text_hash TEXT NOT NULL,
+      dimension INTEGER NOT NULL,
+      embedding_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(content_type, chunk_id, model)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_semantic_embeddings_model
+      ON semantic_embeddings(model, content_type);
+    CREATE INDEX IF NOT EXISTS idx_semantic_embeddings_chunk
+      ON semantic_embeddings(content_type, chunk_id);
+
+    -- ==========================================================================
     -- LLM Wiki Tables (Karpathy three-layer pattern)
     -- ==========================================================================
 
@@ -309,6 +375,40 @@ export function initializeDb() {
     CREATE INDEX IF NOT EXISTS idx_wiki_claims_entity ON wiki_claims(entity_id);
     CREATE INDEX IF NOT EXISTS idx_wiki_log_lecture ON wiki_log(lecture_id);
   `);
+
+  const semanticSchema = db.prepare(`
+    SELECT sql FROM sqlite_master
+    WHERE type = 'table'
+      AND name = 'semantic_embeddings'
+  `).get()?.sql || '';
+  if (semanticSchema && !semanticSchema.includes("'document'")) {
+    db.exec(`
+      CREATE TABLE semantic_embeddings_v2 (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        content_type TEXT NOT NULL CHECK(content_type IN ('transcript','course','document')),
+        chunk_id INTEGER NOT NULL,
+        model TEXT NOT NULL,
+        text_hash TEXT NOT NULL,
+        dimension INTEGER NOT NULL,
+        embedding_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(content_type, chunk_id, model)
+      );
+
+      INSERT INTO semantic_embeddings_v2
+        (id, content_type, chunk_id, model, text_hash, dimension, embedding_json, updated_at)
+      SELECT id, content_type, chunk_id, model, text_hash, dimension, embedding_json, updated_at
+      FROM semantic_embeddings;
+
+      DROP TABLE semantic_embeddings;
+      ALTER TABLE semantic_embeddings_v2 RENAME TO semantic_embeddings;
+
+      CREATE INDEX IF NOT EXISTS idx_semantic_embeddings_model
+        ON semantic_embeddings(model, content_type);
+      CREATE INDEX IF NOT EXISTS idx_semantic_embeddings_chunk
+        ON semantic_embeddings(content_type, chunk_id);
+    `);
+  }
 
   // Migration: add class_number and notion_url to courses if missing
   const courseCols = db.prepare("PRAGMA table_info(courses)").all();

@@ -480,7 +480,7 @@
       <!-- AI Search -->
       <section class="help-section" id="section-ai-search">
         <h1>AI Search</h1>
-        <p class="section-subtitle">AI Search combines full-text retrieval with an AI language model to give you synthesized answers drawn directly from your content.</p>
+        <p class="section-subtitle">AI Search combines full-text retrieval, semantic embeddings, and an AI language model to give you synthesized answers drawn directly from your content.</p>
 
         <h2>Enabling AI Search</h2>
         <p>Click the <strong>✨ AI</strong> button in the search bar to toggle AI mode on. The button turns amber when active and the search placeholder changes to indicate AI mode.</p>
@@ -491,10 +491,13 @@
         <h2>How it works</h2>
         <ol>
           <li>You type a question and press <kbd>Enter</kbd> (AI mode does not auto-search as you type — it waits for Enter).</li>
-          <li>The server runs a full-text search to find the most relevant transcript and course chunks.</li>
+          <li>The server runs hybrid retrieval: full-text search plus semantic search over any chunks already cached in the local semantic index.</li>
           <li>Those chunks are assembled into context and sent to the selected AI model via OpenRouter.</li>
           <li>The model's answer streams back in real time and is displayed in the amber answer card above the results.</li>
         </ol>
+
+        <h2>Semantic index</h2>
+        <p>Open Settings and use <strong>Index docs</strong>, <strong>Index current course</strong>, or <strong>Build full index</strong> under <strong>Semantic Index</strong> to cache embeddings. The vectors are stored locally in the app database, and AI Search will still fall back to full-text retrieval if the index is incomplete or unavailable.</p>
 
         <div class="tip-box">
           <strong>Tip:</strong> Ask specific questions rather than keyword searches. "What did the instructors say about pricing audiobooks?" works better in AI mode than plain search.
@@ -505,11 +508,11 @@
         <ul>
           <li>The AI's synthesized answer, streaming in as it is generated</li>
           <li>The <strong>model name</strong> used for this response</li>
-          <li>After completion: how many <strong>transcript chunks</strong> were used as context, and the <strong>token count</strong> (in / out)</li>
+          <li>After completion: how many <strong>context chunks</strong> were used, and the <strong>token count</strong> (in / out)</li>
         </ul>
 
         <h2>Costs</h2>
-        <p>Each AI search query uses tokens from your OpenRouter account. The cost depends on the model selected. Cheaper models (e.g., Gemini Flash, Llama) cost fractions of a cent per query; premium models (e.g., GPT-4o, Claude) cost more. The token count shown after each response helps you track usage.</p>
+        <p>Each AI search query uses tokens from your OpenRouter account. Semantic indexing also uses embedding tokens when you build or refresh the cache. The cost depends on the models used. Cheaper chat models (e.g., Gemini Flash, Llama) cost fractions of a cent per query; premium models (e.g., GPT-4o, Claude) cost more. The token count shown after each response helps you track usage.</p>
 
         <h2>Stopping a query</h2>
         <p>If you start a new AI search before the previous one finishes, the previous request is automatically cancelled.</p>
@@ -838,6 +841,9 @@
         <h2>Selecting an AI model</h2>
         <p>After saving your API key, click <strong>↻ Refresh</strong> in the Model section to fetch the current list of available models. Then click the model dropdown and choose one. You can filter the list by typing in the search box.</p>
         <p>The pricing shown next to each model is per million tokens (input / output). For casual use, models like <strong>google/gemini-flash-1.5</strong> or <strong>meta-llama/llama-3.1-8b-instruct:free</strong> are good starting points.</p>
+
+        <h2>Semantic Index</h2>
+        <p>Click <strong>Index docs</strong> for imported Markdown/text references, <strong>Index current course</strong> for the selected course, or <strong>Build full index</strong> for the entire local library. This improves AI Search on questions that use different wording than the transcript. The cache is stored locally and refreshes stale chunks when their text changes.</p>
 
         <div class="tip-box">
           <strong>Tip:</strong> Your selected model and playback speed are saved automatically and persist across sessions.

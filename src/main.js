@@ -20,6 +20,7 @@ const state = {
     selectedModel: '',
     hasApiKey: false,
     aiAbortController: null,
+    semanticIndexController: null,
     // Teachable courses
     courses: [],
     sources: [],
@@ -92,6 +93,7 @@ const el = {
     aiToggle: document.getElementById('ai-toggle'),
     aiAnswerContainer: document.getElementById('ai-answer-container'),
     aiAnswerBody: document.getElementById('ai-answer-body'),
+    aiSourceList: document.getElementById('ai-source-list'),
     aiThinking: document.getElementById('ai-thinking'),
     aiAnswerFooter: document.getElementById('ai-answer-footer'),
     aiChunksUsed: document.getElementById('ai-chunks-used'),
@@ -106,6 +108,10 @@ const el = {
     settingsKeyStatus: document.getElementById('settings-key-status'),
     settingsRefreshModels: document.getElementById('settings-refresh-models'),
     settingsModelStatus: document.getElementById('settings-model-status'),
+    settingsSemanticIndexDocs: document.getElementById('settings-semantic-index-docs'),
+    settingsSemanticIndexCurrent: document.getElementById('settings-semantic-index-current'),
+    settingsSemanticReindex: document.getElementById('settings-semantic-reindex'),
+    settingsSemanticStatus: document.getElementById('settings-semantic-status'),
     modelTrigger: document.getElementById('model-trigger'),
     modelList: document.getElementById('model-list'),
     modelDropdown: document.getElementById('model-dropdown'),
@@ -118,6 +124,15 @@ const el = {
     coursePickerLoading: document.getElementById('course-picker-loading'),
     coursePickerList: document.getElementById('course-picker-list'),
     startScrapeBtn: document.getElementById('start-scrape-btn'),
+    pasteCourseLinkBtn: document.getElementById('paste-course-link-btn'),
+    importDocumentBtn: document.getElementById('import-document-btn'),
+    importDocumentInput: document.getElementById('import-document-input'),
+    courseLinkModalOverlay: document.getElementById('course-link-modal-overlay'),
+    courseLinkForm: document.getElementById('course-link-form'),
+    courseLinkInput: document.getElementById('course-link-input'),
+    courseLinkError: document.getElementById('course-link-error'),
+    courseLinkCancel: document.getElementById('course-link-cancel'),
+    courseLinkSubmit: document.getElementById('course-link-submit'),
     cancelAddCourse: document.getElementById('cancel-add-course'),
     scrapeProgress: document.getElementById('scrape-progress'),
     scrapeMessage: document.getElementById('scrape-message'),
@@ -465,6 +480,23 @@ async function loadTranscriptDetail(id, highlightQuery) {
                 chunks: lecture.chunks || [],
             };
             renderTranscriptDetail(transcript, highlightQuery);
+            switchView('detail');
+            return;
+        }
+        if (id && String(id).startsWith('doc-')) {
+            const docId = String(id).replace('doc-', '');
+            const doc = await api(`/api/library/documents/${docId}`);
+            renderTranscriptDetail({
+                id,
+                title: doc.title,
+                filename: doc.file_path || 'Library document',
+                lecture: doc.title,
+                transcript_type: 'Document',
+                lecture_date: doc.updated_at?.split(' ')[0],
+                content: doc.content || '(No text content)',
+                result_type: 'document',
+                chunks: doc.chunks || [],
+            }, highlightQuery);
             switchView('detail');
             return;
         }
@@ -1100,6 +1132,54 @@ function updateAiToggleState() {
 
 function hideAiAnswer() {
     el.aiAnswerContainer.classList.add('hidden');
+    if (el.aiSourceList) {
+        el.aiSourceList.classList.add('hidden');
+        el.aiSourceList.innerHTML = '';
+    }
+}
+
+function aiSourceTarget(source) {
+    if (source.type === 'course') return `clec-${source.id}`;
+    if (source.type === 'document') return `doc-${source.id}`;
+    return String(source.id);
+}
+
+function renderAiSources(sources) {
+    if (!el.aiSourceList) return;
+    if (!Array.isArray(sources) || sources.length === 0) {
+        el.aiSourceList.classList.add('hidden');
+        el.aiSourceList.innerHTML = '';
+        return;
+    }
+
+    const labelFor = { transcript: 'Transcript', course: 'Course', document: 'Document' };
+    el.aiSourceList.innerHTML = `
+        <div class="ai-source-heading">Sources</div>
+        ${sources.map((source, index) => `
+            <button type="button" class="ai-source-link" data-target-id="${escapeHtml(aiSourceTarget(source))}">
+                <span class="ai-source-index">${escapeHtml(String(source.number || index + 1))}</span>
+                <span class="ai-source-main">
+                    <span class="ai-source-title">${escapeHtml(source.title || 'Untitled')}</span>
+                    <span class="ai-source-meta">${escapeHtml(labelFor[source.type] || source.type || 'Source')}${source.timestamp ? ` · ${escapeHtml(source.timestamp)}` : ''}${source.chunks > 1 ? ` · ${source.chunks} chunks` : ''}</span>
+                </span>
+            </button>
+        `).join('')}
+    `;
+    el.aiSourceList.classList.remove('hidden');
+    el.aiSourceList.querySelectorAll('.ai-source-link').forEach(btn => {
+        btn.addEventListener('click', () => {
+            loadTranscriptDetail(btn.dataset.targetId, state.searchQuery);
+        });
+    });
+}
+
+function bindAiCitationLinks() {
+    el.aiAnswerBody.querySelectorAll('.ai-citation-link').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const targetId = btn.dataset.targetId;
+            if (targetId) loadTranscriptDetail(targetId, state.searchQuery);
+        });
+    });
 }
 
 async function doAiAsk(question) {
@@ -1125,6 +1205,10 @@ async function doAiAsk(question) {
     // Show answer card with thinking state
     el.aiAnswerContainer.classList.remove('hidden');
     el.aiAnswerBody.innerHTML = '<div class="ai-thinking">Searching transcripts and thinking...</div>';
+    if (el.aiSourceList) {
+        el.aiSourceList.classList.add('hidden');
+        el.aiSourceList.innerHTML = '';
+    }
     el.aiAnswerFooter.classList.add('hidden');
     el.aiModelLabel.textContent = state.selectedModel;
     el.searchMeta.textContent = `AI searching for: "${question}"`;
@@ -1159,6 +1243,7 @@ async function doAiAsk(question) {
         let buffer = '';
         let fullText = '';
         let chunksUsed = 0;
+        let aiSources = [];
 
         el.aiAnswerBody.innerHTML = '';
 
@@ -1176,17 +1261,20 @@ async function doAiAsk(question) {
                     const event = JSON.parse(line.slice(6));
                     if (event.type === 'context') {
                         chunksUsed = event.chunks;
+                        aiSources = event.sources || [];
+                        renderAiSources(aiSources);
                     } else if (event.type === 'text') {
                         fullText += event.content;
-                        el.aiAnswerBody.innerHTML = renderMarkdown(fullText);
+                        el.aiAnswerBody.innerHTML = renderMarkdown(fullText, aiSources);
+                        bindAiCitationLinks();
                     } else if (event.type === 'usage') {
                         const u = event.usage;
                         el.aiUsage.textContent = `${u.prompt_tokens} in / ${u.completion_tokens} out tokens`;
                     } else if (event.type === 'done') {
                         // Show footer
                         el.aiAnswerFooter.classList.remove('hidden');
-                        el.aiChunksUsed.textContent = `${chunksUsed} transcript chunks used as context`;
-                        el.searchMeta.textContent = `AI answer based on ${chunksUsed} relevant transcript chunks`;
+                        el.aiChunksUsed.textContent = `${chunksUsed} context chunks used`;
+                        el.searchMeta.textContent = `AI answer based on ${chunksUsed} relevant context chunks from ${aiSources.length} source${aiSources.length !== 1 ? 's' : ''}`;
                     } else if (event.type === 'error') {
                         el.aiAnswerBody.innerHTML += `<div style="color: #ff6b6b; margin-top: 8px">${escapeHtml(event.message)}</div>`;
                     }
@@ -1200,22 +1288,143 @@ async function doAiAsk(question) {
     }
 }
 
-/** Simple markdown-like rendering for AI responses */
-function renderMarkdown(text) {
-    let html = escapeHtml(text);
-    html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-    html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
-    html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-    // Use placeholder tags to keep bullet vs numbered items distinct until wrapping
-    html = html.replace(/^- (.+)$/gm, '<bli>$1</bli>');
-    html = html.replace(/^\d+\.\s(.+)$/gm, '<oli>$1</oli>');
-    html = html.replace(/(<bli>.+?<\/bli>\n?)+/g, match =>
-        '<ul>' + match.replace(/<bli>(.+?)<\/bli>\n?/g, '<li>$1</li>') + '</ul>');
-    html = html.replace(/(<oli>.+?<\/oli>\n?)+/g, match =>
-        '<ol>' + match.replace(/<oli>(.+?)<\/oli>\n?/g, '<li>$1</li>') + '</ol>');
-    html = html.replace(/\n\n/g, '</p><p>');
-    html = html.replace(/\n/g, '<br>');
-    return `<p>${html}</p>`;
+/** Render the limited Markdown shape used by AI responses. */
+function renderMarkdown(text, sources = []) {
+    const sourceByNumber = new Map((sources || []).map(source => [String(source.number), source]));
+    const citationTokens = [];
+    const stashCitation = (sourceNumber) => {
+        const source = sourceByNumber.get(String(sourceNumber));
+        if (!source) return `Source ${sourceNumber}`;
+        const token = `@@AI_SOURCE_${citationTokens.length}@@`;
+        citationTokens.push(`<button type="button" class="ai-citation-link" data-target-id="${escapeHtml(aiSourceTarget(source))}">Source ${escapeHtml(String(sourceNumber))}</button>`);
+        return token;
+    };
+
+    const inlineCodeTokens = [];
+    const stashInlineCode = (code) => {
+        const token = `@@AI_CODE_${inlineCodeTokens.length}@@`;
+        inlineCodeTokens.push(`<code>${escapeHtml(code)}</code>`);
+        return token;
+    };
+
+    const renderInline = (raw) => {
+        let html = escapeHtml(raw).replace(/`([^`]+)`/g, (_, code) => stashInlineCode(code));
+        html = html.replace(/\[Sources?\s+(\d+)\]\(source:(\d+)\)/gi, (_, labelNumber, targetNumber) =>
+            stashCitation(targetNumber || labelNumber));
+        html = html.replace(/\bSources?\s+(\d+(?:(?:\s*,\s*|\s+and\s+)\d+\*?)*)/gi, (_, sourceList) =>
+            sourceList
+                .split(/\s*,\s*|\s+and\s+/)
+                .map(part => part.trim().replace(/\*$/, ''))
+                .filter(Boolean)
+                .map(sourceNumber => stashCitation(sourceNumber))
+                .join(', '));
+        html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+        html = html.replace(/(^|[\s(])\*(?!\s)([^*]+?)\*(?=[\s).,;:!?]|$)/g, '$1<em>$2</em>');
+        inlineCodeTokens.forEach((code, index) => {
+            html = html.replace(`@@AI_CODE_${index}@@`, code);
+        });
+        return html;
+    };
+
+    const lines = String(text || '').replace(/\r\n?/g, '\n').trim().split('\n');
+    const blocks = [];
+    let paragraph = [];
+    let listType = null;
+    let listItems = [];
+
+    const closeParagraph = () => {
+        if (!paragraph.length) return;
+        blocks.push(`<p>${renderInline(paragraph.join(' ').trim())}</p>`);
+        paragraph = [];
+    };
+
+    const closeList = () => {
+        if (!listType) return;
+        const tag = listType;
+        blocks.push(`<${tag}>${listItems.map(item => `<li>${renderInline(item)}</li>`).join('')}</${tag}>`);
+        listType = null;
+        listItems = [];
+    };
+
+    for (let index = 0; index < lines.length; index++) {
+        const line = lines[index];
+        const trimmed = line.trim();
+
+        if (!trimmed) {
+            closeParagraph();
+            closeList();
+            continue;
+        }
+
+        const fence = trimmed.match(/^```(\w+)?\s*$/);
+        if (fence) {
+            closeParagraph();
+            closeList();
+            const codeLines = [];
+            index++;
+            while (index < lines.length && !lines[index].trim().startsWith('```')) {
+                codeLines.push(lines[index]);
+                index++;
+            }
+            const langClass = fence[1] ? ` class="language-${escapeHtml(fence[1])}"` : '';
+            blocks.push(`<pre><code${langClass}>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
+            continue;
+        }
+
+        const heading = trimmed.match(/^(#{1,4})\s+(.+)$/);
+        if (heading) {
+            closeParagraph();
+            closeList();
+            const level = heading[1].length;
+            blocks.push(`<h${level}>${renderInline(heading[2])}</h${level}>`);
+            continue;
+        }
+
+        if (/^(-{3,}|\*{3,})$/.test(trimmed)) {
+            closeParagraph();
+            closeList();
+            blocks.push('<hr>');
+            continue;
+        }
+
+        const quote = trimmed.match(/^>\s?(.*)$/);
+        if (quote) {
+            closeParagraph();
+            closeList();
+            const quoteLines = [quote[1]];
+            while (index + 1 < lines.length) {
+                const next = lines[index + 1].trim().match(/^>\s?(.*)$/);
+                if (!next) break;
+                quoteLines.push(next[1]);
+                index++;
+            }
+            blocks.push(`<blockquote>${renderInline(quoteLines.join(' '))}</blockquote>`);
+            continue;
+        }
+
+        const unordered = trimmed.match(/^[-*]\s+(.+)$/);
+        const ordered = trimmed.match(/^\d+\.\s+(.+)$/);
+        if (unordered || ordered) {
+            closeParagraph();
+            const nextListType = unordered ? 'ul' : 'ol';
+            if (listType && listType !== nextListType) closeList();
+            listType = nextListType;
+            listItems.push(unordered ? unordered[1] : ordered[1]);
+            continue;
+        }
+
+        closeList();
+        paragraph.push(trimmed);
+    }
+
+    closeParagraph();
+    closeList();
+
+    let html = blocks.join('');
+    citationTokens.forEach((citation, index) => {
+        html = html.replaceAll(`@@AI_SOURCE_${index}@@`, citation);
+    });
+    return html || '<p></p>';
 }
 
 // =============================================================================
@@ -1234,6 +1443,7 @@ function openSettings() {
             el.modelTrigger.textContent = state.selectedModel;
         }
     });
+    loadSemanticStatus();
     // Refresh media library path info
     loadMediaLibrarySettings();
 }
@@ -1276,6 +1486,134 @@ async function fetchModels() {
     } catch (e) {
         el.settingsModelStatus.textContent = e.message || 'Failed to fetch models';
         el.settingsModelStatus.classList.add('error');
+    }
+}
+
+function formatSemanticStatus(status) {
+    if (!status || !status.totalChunks) return 'No transcript or course chunks to index yet.';
+    const prefix = status.scopeLabel && status.scopeLabel !== 'Full library' ? `${status.scopeLabel}: ` : '';
+    const parts = [`${prefix}${status.indexedChunks}/${status.totalChunks} chunks indexed`];
+    if (status.staleChunks) parts.push(`${status.staleChunks} stale`);
+    parts.push(status.model);
+    return parts.join(' · ');
+}
+
+async function loadSemanticStatus() {
+    if (!el.settingsSemanticStatus) return;
+    try {
+        const status = await api('/api/ai/semantic/status');
+        el.settingsSemanticStatus.textContent = formatSemanticStatus(status);
+        el.settingsSemanticStatus.classList.remove('error');
+    } catch (e) {
+        el.settingsSemanticStatus.textContent = e.message || 'Failed to load semantic index status';
+        el.settingsSemanticStatus.classList.add('error');
+    }
+}
+
+function setSemanticIndexButtonsDisabled(disabled) {
+    [el.settingsSemanticIndexDocs, el.settingsSemanticIndexCurrent, el.settingsSemanticReindex]
+        .filter(Boolean)
+        .forEach(btn => { btn.disabled = disabled; });
+}
+
+function semanticIndexRequestForScope(scope) {
+    if (scope === 'documents') return { scope: 'documents' };
+    if (scope === 'current-course') {
+        if (!state.activeSource?.startsWith('course-')) {
+            throw new Error('Choose a course in Browse before indexing the current course.');
+        }
+        return {
+            scope: 'current-course',
+            courses: [Number(state.activeSource.replace('course-', ''))],
+        };
+    }
+    return { scope: 'all' };
+}
+
+function semanticIndexRunningLabel(scope) {
+    if (scope === 'documents') return 'Indexing docs...';
+    if (scope === 'current-course') return 'Indexing course...';
+    return 'Indexing full library...';
+}
+
+async function buildSemanticIndex(scope = 'all') {
+    if (!el.settingsSemanticStatus) return;
+    if (!state.hasApiKey) {
+        el.settingsSemanticStatus.textContent = 'Add your OpenRouter API key first.';
+        el.settingsSemanticStatus.classList.add('error');
+        return;
+    }
+
+    let requestBody;
+    try {
+        requestBody = semanticIndexRequestForScope(scope);
+    } catch (e) {
+        el.settingsSemanticStatus.textContent = e.message;
+        el.settingsSemanticStatus.classList.add('error');
+        return;
+    }
+
+    if (state.semanticIndexController) {
+        state.semanticIndexController.abort();
+    }
+    state.semanticIndexController = new AbortController();
+    setSemanticIndexButtonsDisabled(true);
+    const activeButton = scope === 'documents'
+        ? el.settingsSemanticIndexDocs
+        : scope === 'current-course'
+            ? el.settingsSemanticIndexCurrent
+            : el.settingsSemanticReindex;
+    const originalButtonText = activeButton?.textContent;
+    if (activeButton) activeButton.textContent = semanticIndexRunningLabel(scope);
+    el.settingsSemanticStatus.textContent = `Starting ${requestBody.scope === 'all' ? 'full library' : requestBody.scope} index...`;
+    el.settingsSemanticStatus.classList.remove('error');
+
+    try {
+        const response = await fetch('/api/ai/semantic/reindex', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(requestBody),
+            signal: state.semanticIndexController.signal,
+        });
+        if (!response.ok) {
+            let message = `Semantic index failed (${response.status})`;
+            try {
+                const err = await response.json();
+                if (err.error) message = err.error;
+            } catch { /* keep status message */ }
+            throw new Error(message);
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+            for (const line of lines) {
+                if (!line.startsWith('data: ')) continue;
+                const event = JSON.parse(line.slice(6));
+                if (event.type === 'error') {
+                    throw new Error(event.message || 'Semantic index failed');
+                }
+                if (event.type === 'status' || event.type === 'progress' || event.type === 'done') {
+                    el.settingsSemanticStatus.textContent = formatSemanticStatus(event);
+                }
+            }
+        }
+    } catch (e) {
+        if (e.name !== 'AbortError') {
+            el.settingsSemanticStatus.textContent = e.message || 'Semantic index failed';
+            el.settingsSemanticStatus.classList.add('error');
+        }
+    } finally {
+        state.semanticIndexController = null;
+        setSemanticIndexButtonsDisabled(false);
+        if (activeButton && originalButtonText) activeButton.textContent = originalButtonText;
     }
 }
 
@@ -1348,6 +1686,15 @@ function setupSettingsListeners() {
 
     // Refresh models
     el.settingsRefreshModels.addEventListener('click', fetchModels);
+    if (el.settingsSemanticIndexDocs) {
+        el.settingsSemanticIndexDocs.addEventListener('click', () => buildSemanticIndex('documents'));
+    }
+    if (el.settingsSemanticIndexCurrent) {
+        el.settingsSemanticIndexCurrent.addEventListener('click', () => buildSemanticIndex('current-course'));
+    }
+    if (el.settingsSemanticReindex) {
+        el.settingsSemanticReindex.addEventListener('click', () => buildSemanticIndex('all'));
+    }
 
     // Model dropdown toggle
     el.modelTrigger.addEventListener('click', () => {
@@ -2340,6 +2687,14 @@ async function startScrape(url, { hideOnDone = true } = {}) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ url, forceRefresh }),
         });
+        if (!res.ok) {
+            let message = `Scrape failed (${res.status})`;
+            try {
+                const data = await res.json();
+                if (data.error) message = data.error;
+            } catch { /* keep status message */ }
+            throw new Error(message);
+        }
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
@@ -2375,6 +2730,56 @@ async function startScrape(url, { hideOnDone = true } = {}) {
         }
     } catch (e) {
         el.scrapeMessage.textContent = `❌ ${e.message}`;
+    }
+}
+
+function openCourseLinkModal() {
+    if (!el.courseLinkModalOverlay) return;
+    el.courseLinkError?.classList.add('hidden');
+    if (el.courseLinkError) el.courseLinkError.textContent = '';
+    if (el.courseLinkInput) el.courseLinkInput.value = '';
+    el.courseLinkModalOverlay.classList.remove('hidden');
+    setTimeout(() => el.courseLinkInput?.focus(), 0);
+}
+
+function closeCourseLinkModal() {
+    el.courseLinkModalOverlay?.classList.add('hidden');
+}
+
+function isValidTeachableCourseLink(value) {
+    return /^https?:\/\/[^/\s]+\.teachable\.com\/courses\/[^/\s]+(?:\/|$)/i.test(value.trim());
+}
+
+async function importLibraryDocument(file) {
+    if (!file) return;
+    const allowed = /\.(md|markdown|txt)$/i.test(file.name);
+    if (!allowed) {
+        alert('Choose a Markdown or text file.');
+        return;
+    }
+
+    el.scrapeProgress.classList.remove('hidden');
+    el.scrapeMessage.textContent = `Importing "${file.name}"...`;
+    el.scrapePct.textContent = '0%';
+    el.scrapeBar.style.width = '0%';
+
+    try {
+        const content = await file.text();
+        const res = await fetch('/api/library/documents/import', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ filename: file.name, content }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `Import failed (${res.status})`);
+
+        el.scrapePct.textContent = '100%';
+        el.scrapeBar.style.width = '100%';
+        el.scrapeMessage.textContent = `Imported "${data.title}" (${data.chunks} chunks). Build the semantic index to embed it.`;
+        await loadSemanticStatus();
+        setTimeout(() => el.scrapeProgress.classList.add('hidden'), 5000);
+    } catch (e) {
+        el.scrapeMessage.textContent = `Import failed: ${e.message}`;
     }
 }
 
@@ -2458,6 +2863,52 @@ function setupCourseListeners() {
     if (el.cancelAddCourse) {
         el.cancelAddCourse.addEventListener('click', () => {
             el.addCoursePanel.classList.add('hidden');
+        });
+    }
+
+    if (el.pasteCourseLinkBtn) {
+        el.pasteCourseLinkBtn.addEventListener('click', openCourseLinkModal);
+    }
+
+    if (el.importDocumentBtn && el.importDocumentInput) {
+        el.importDocumentBtn.addEventListener('click', () => {
+            el.importDocumentInput.value = '';
+            el.importDocumentInput.click();
+        });
+        el.importDocumentInput.addEventListener('change', async () => {
+            await importLibraryDocument(el.importDocumentInput.files?.[0]);
+        });
+    }
+
+    if (el.courseLinkCancel) {
+        el.courseLinkCancel.addEventListener('click', closeCourseLinkModal);
+    }
+
+    if (el.courseLinkModalOverlay) {
+        el.courseLinkModalOverlay.addEventListener('click', (e) => {
+            if (e.target === el.courseLinkModalOverlay) closeCourseLinkModal();
+        });
+    }
+
+    if (el.courseLinkForm) {
+        el.courseLinkForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const url = el.courseLinkInput?.value.trim() || '';
+            if (!isValidTeachableCourseLink(url)) {
+                if (el.courseLinkError) {
+                    el.courseLinkError.textContent = 'Enter a Teachable course or lecture link.';
+                    el.courseLinkError.classList.remove('hidden');
+                }
+                return;
+            }
+
+            if (el.courseLinkSubmit) el.courseLinkSubmit.disabled = true;
+            try {
+                closeCourseLinkModal();
+                await startScrape(url);
+            } finally {
+                if (el.courseLinkSubmit) el.courseLinkSubmit.disabled = false;
+            }
         });
     }
 

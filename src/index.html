@@ -86,6 +86,11 @@
             </div>
           </div>
           <div id="course-picker-list" class="course-picker-list"></div>
+          <div class="course-link-entry">
+            <button type="button" class="course-link-btn" id="paste-course-link-btn">Paste Link</button>
+            <button type="button" class="course-link-btn" id="import-document-btn">Import Doc</button>
+            <input type="file" id="import-document-input" class="hidden" accept=".md,.markdown,.txt,text/markdown,text/plain" />
+          </div>
           <!-- Phase 4b: force-refresh option -->
           <label class="scrape-modal-option">
             <input type="checkbox" id="scrape-force-refresh" />
@@ -185,6 +190,7 @@
             <div class="ai-answer-body" id="ai-answer-body">
               <div class="ai-thinking" id="ai-thinking">Searching transcripts and thinking...</div>
             </div>
+            <div class="ai-source-list hidden" id="ai-source-list"></div>
             <div class="ai-answer-footer hidden" id="ai-answer-footer">
               <span class="ai-chunks-used" id="ai-chunks-used"></span>
               <span class="ai-usage" id="ai-usage"></span>
@@ -290,6 +296,20 @@
           </div>
           <div class="settings-status" id="settings-model-status"></div>
         </div>
+        <div class="settings-section">
+          <div class="settings-row">
+            <label class="settings-label">Semantic Index</label>
+            <div class="semantic-index-actions">
+              <button class="settings-btn" id="settings-semantic-index-docs">Index docs</button>
+              <button class="settings-btn" id="settings-semantic-index-current">Index current course</button>
+              <button class="settings-btn secondary" id="settings-semantic-reindex">Build full index</button>
+            </div>
+          </div>
+          <div class="settings-hint">
+            Caches OpenRouter embeddings locally. Index docs is fastest; full library can take a long time.
+          </div>
+          <div class="settings-status" id="settings-semantic-status"></div>
+        </div>
         <hr class="settings-divider" />
         <div class="settings-section">
           <h3 class="settings-section-heading">Media Library</h3>
@@ -337,6 +357,19 @@
         <button class="delete-modal-cancel" id="delete-modal-cancel">Cancel</button>
       </div>
     </div>
+  </div>
+
+  <div class="delete-modal-overlay hidden" id="course-link-modal-overlay">
+    <form class="course-link-modal" id="course-link-form">
+      <h3>Paste Teachable Link</h3>
+      <input type="text" id="course-link-input" class="course-link-input" inputmode="url"
+        placeholder="https://future-fiction-academy.teachable.com/courses/..." autocomplete="off" />
+      <div class="course-link-error hidden" id="course-link-error"></div>
+      <div class="delete-modal-actions">
+        <button type="submit" class="delete-modal-confirm" id="course-link-submit">Scrape</button>
+        <button type="button" class="delete-modal-cancel" id="course-link-cancel">Cancel</button>
+      </div>
+    </form>
   </div>
 
   <!-- Phase 4b: Archive Videos progress panel. Floats above the UI in the

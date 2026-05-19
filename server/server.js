@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { initializeDb, getDb, closeDb } from './db.js';
@@ -14,7 +15,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 
 // Initialize database on startup
 initializeDb();
@@ -362,6 +363,14 @@ const SETTINGS_DIR = process.env.DATA_DIR
     : path.join(__dirname, '..', 'data');
 const SETTINGS_PATH = path.join(SETTINGS_DIR, 'ai-settings.json');
 const OPENROUTER_BASE = 'https://openrouter.ai/api/v1';
+const DEFAULT_EMBEDDING_MODEL = 'openai/text-embedding-3-small';
+const SEMANTIC_BATCH_SIZE = 32;
+const SEMANTIC_CONTEXT_LIMIT = 10;
+const EMBEDDING_REQUEST_TIMEOUT_MS = 60_000;
+const EMBEDDING_MAX_RETRIES = 3;
+const DEFAULT_LIBRARY_DOCUMENTS = [
+    path.join(__dirname, '..', 'docs', 'progressive_disclosure_guide.md'),
+];
 
 function loadSettings() {
     try {
@@ -405,6 +414,117 @@ function writeSettingsJson(settings) {
     fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2));
 }
 
+function parseMarkdownMetadata(markdown, fallbackTitle) {
+    const metadata = { title: fallbackTitle, description: '', sourceUrl: '' };
+    const frontmatter = markdown.match(/^---\n([\s\S]*?)\n---\n?/);
+    if (frontmatter) {
+        for (const line of frontmatter[1].split('\n')) {
+            const match = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
+            if (!match) continue;
+            const key = match[1].toLowerCase();
+            const value = match[2].trim().replace(/^["']|["']$/g, '');
+            if (key === 'title') metadata.title = value || metadata.title;
+            if (key === 'description') metadata.description = value;
+            if (key === 'notion_link' || key === 'source_url') metadata.sourceUrl = value;
+        }
+    }
+    const heading = markdown.match(/^#\s+(.+)$/m);
+    if ((!metadata.title || metadata.title === fallbackTitle) && heading) {
+        metadata.title = heading[1].trim();
+    }
+    return metadata;
+}
+
+function chunkLibraryDocument(markdown, maxWords = 450) {
+    const body = markdown.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+    const blocks = body.split(/\n(?=#{1,3}\s)|\n\s*\n/).map(block => block.trim()).filter(Boolean);
+    const chunks = [];
+    let current = '';
+    let currentWords = 0;
+
+    for (const block of blocks) {
+        const words = block.split(/\s+/).filter(Boolean).length;
+        if (current && currentWords + words > maxWords) {
+            chunks.push(current.trim());
+            current = '';
+            currentWords = 0;
+        }
+        current += (current ? '\n\n' : '') + block;
+        currentWords += words;
+    }
+    if (current.trim()) chunks.push(current.trim());
+    return chunks;
+}
+
+function upsertLibraryDocument({ filePath, markdown }) {
+    const resolvedPath = filePath;
+    const contentHash = crypto.createHash('sha256').update(markdown, 'utf8').digest('hex');
+    const fallbackTitle = path.basename(resolvedPath, path.extname(resolvedPath));
+    const metadata = parseMarkdownMetadata(markdown, fallbackTitle);
+    const chunks = chunkLibraryDocument(markdown);
+    if (chunks.length === 0) return null;
+
+    const db = getDb();
+    const existing = db.prepare('SELECT id, content_hash FROM library_documents WHERE file_path = ?').get(resolvedPath);
+    if (existing?.content_hash === contentHash) {
+        return { id: existing.id, title: metadata.title, chunks: chunks.length, changed: false };
+    }
+
+    const tx = db.transaction(() => {
+        let documentId = existing?.id;
+        if (documentId) {
+            db.prepare(`
+                UPDATE library_documents
+                SET title = ?, description = ?, source_url = ?, content_hash = ?, updated_at = datetime('now')
+                WHERE id = ?
+            `).run(metadata.title, metadata.description, metadata.sourceUrl, contentHash, documentId);
+            db.prepare('DELETE FROM library_document_chunks WHERE document_id = ?').run(documentId);
+        } else {
+            const result = db.prepare(`
+                INSERT INTO library_documents
+                  (title, file_path, description, source_url, content_hash, updated_at)
+                VALUES (?, ?, ?, ?, ?, datetime('now'))
+            `).run(metadata.title, resolvedPath, metadata.description, metadata.sourceUrl, contentHash);
+            documentId = result.lastInsertRowid;
+        }
+
+        const insertChunk = db.prepare(`
+            INSERT INTO library_document_chunks (document_id, chunk_index, content)
+            VALUES (?, ?, ?)
+        `);
+        chunks.forEach((chunk, index) => insertChunk.run(documentId, index, chunk));
+        return documentId;
+    });
+
+    const id = tx();
+    return { id, title: metadata.title, chunks: chunks.length, changed: true };
+}
+
+function syncLibraryDocument(filePath) {
+    const resolvedPath = path.resolve(filePath);
+    if (!fs.existsSync(resolvedPath)) return null;
+
+    return upsertLibraryDocument({
+        filePath: resolvedPath,
+        markdown: fs.readFileSync(resolvedPath, 'utf8'),
+    });
+}
+
+function syncDefaultLibraryDocuments() {
+    for (const filePath of DEFAULT_LIBRARY_DOCUMENTS) {
+        try {
+            const result = syncLibraryDocument(filePath);
+            if (result?.changed) {
+                console.log(`[library] synced "${result.title}" (${result.chunks} chunks)`);
+            }
+        } catch (err) {
+            console.warn(`[library] failed to sync ${filePath}: ${err.message}`);
+        }
+    }
+}
+
+syncDefaultLibraryDocuments();
+
 async function getPathInfo(pathStr) {
     const result = { path: pathStr, exists: false, writable: false, freeSpaceBytes: null, usedBytes: 0, videoCount: 0 };
     try {
@@ -446,24 +566,29 @@ app.get('/api/ai/settings', (req, res) => {
         apiKey: settings.apiKey ? '••••' + settings.apiKey.slice(-6) : '',
         hasKey: !!settings.apiKey,
         selectedModel: settings.selectedModel || '',
+        embeddingModel: settings.embeddingModel || process.env.OPENROUTER_EMBEDDING_MODEL || DEFAULT_EMBEDDING_MODEL,
     });
 });
 
 // POST /api/ai/settings
 app.post('/api/ai/settings', (req, res) => {
     const current = loadSettings();
-    const { apiKey, selectedModel } = req.body;
+    const { apiKey, selectedModel, embeddingModel } = req.body;
     if (apiKey !== undefined && !apiKey.startsWith('••••')) {
         current.apiKey = apiKey;
     }
     if (selectedModel !== undefined) {
         current.selectedModel = selectedModel;
     }
+    if (embeddingModel !== undefined) {
+        current.embeddingModel = String(embeddingModel || '').trim() || DEFAULT_EMBEDDING_MODEL;
+    }
     saveSettings(current);
     res.json({
         apiKey: current.apiKey ? '••••' + current.apiKey.slice(-6) : '',
         hasKey: !!current.apiKey,
         selectedModel: current.selectedModel,
+        embeddingModel: current.embeddingModel || process.env.OPENROUTER_EMBEDDING_MODEL || DEFAULT_EMBEDDING_MODEL,
     });
 });
 
@@ -509,6 +634,664 @@ app.get('/api/ai/models', async (req, res) => {
     }
 });
 
+// POST /api/library/documents/import — import a loose Markdown/text document
+// into the global AI-searchable reference library.
+app.post('/api/library/documents/import', (req, res) => {
+    try {
+        const { filename, content } = req.body || {};
+        const cleanName = path.basename(String(filename || 'Imported Document.md')).trim();
+        const markdown = String(content || '').trim();
+
+        if (!markdown) {
+            return res.status(400).json({ error: 'Document is empty' });
+        }
+        if (markdown.length > 5_000_000) {
+            return res.status(413).json({ error: 'Document is too large. Keep imports under 5 MB.' });
+        }
+
+        const result = upsertLibraryDocument({
+            filePath: `upload://${cleanName}`,
+            markdown,
+        });
+        if (!result) {
+            return res.status(400).json({ error: 'No importable text found' });
+        }
+        res.json({ ...result, filename: cleanName });
+    } catch (err) {
+        console.error('Library document import failed:', err.message);
+        res.status(500).json({ error: 'Failed to import document' });
+    }
+});
+
+// GET /api/library/documents/:id — view an imported/global reference document
+app.get('/api/library/documents/:id', (req, res) => {
+    try {
+        const id = Number(req.params.id);
+        if (!Number.isInteger(id) || id <= 0) {
+            return res.status(400).json({ error: 'Invalid document id' });
+        }
+
+        const db = getDb();
+        const doc = db.prepare(`
+            SELECT id, title, file_path, description, source_url, updated_at
+            FROM library_documents
+            WHERE id = ?
+        `).get(id);
+        if (!doc) return res.status(404).json({ error: 'Document not found' });
+
+        const chunks = db.prepare(`
+            SELECT id, chunk_index, content
+            FROM library_document_chunks
+            WHERE document_id = ?
+            ORDER BY chunk_index
+        `).all(id);
+
+        res.json({
+            ...doc,
+            content: chunks.map(c => c.content).join('\n\n'),
+            chunks,
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+function getEmbeddingModel(settings) {
+    return settings.embeddingModel || process.env.OPENROUTER_EMBEDDING_MODEL || DEFAULT_EMBEDDING_MODEL;
+}
+
+function hashText(text) {
+    return crypto.createHash('sha256').update(String(text || ''), 'utf8').digest('hex');
+}
+
+function parseCourseIds(courseFilter) {
+    if (!courseFilter) return [];
+    return (Array.isArray(courseFilter) ? courseFilter : String(courseFilter).split(','))
+        .map(Number)
+        .filter(Boolean);
+}
+
+function normalizeVector(vector) {
+    if (!Array.isArray(vector)) return null;
+    const normalized = vector.map(Number).filter(n => Number.isFinite(n));
+    return normalized.length === vector.length ? normalized : null;
+}
+
+function cosineSimilarity(a, b) {
+    if (!a || !b || a.length === 0 || b.length === 0 || a.length !== b.length) return 0;
+    let dot = 0;
+    let magA = 0;
+    let magB = 0;
+    for (let i = 0; i < a.length; i++) {
+        dot += a[i] * b[i];
+        magA += a[i] * a[i];
+        magB += b[i] * b[i];
+    }
+    if (!magA || !magB) return 0;
+    return dot / (Math.sqrt(magA) * Math.sqrt(magB));
+}
+
+function buildTranscriptWhere({ source_id, lecture, type, semanticScope }) {
+    if (semanticScope === 'documents' || semanticScope === 'courses' || semanticScope === 'current-course') {
+        return { skip: true, clause: '', whereClause: '', params: [] };
+    }
+    const where = [];
+    const params = [];
+    if (source_id) { where.push('t.source_id = ?'); params.push(source_id); }
+    if (lecture) { where.push('t.lecture = ?'); params.push(lecture); }
+    if (type) { where.push('t.transcript_type = ?'); params.push(type); }
+    return {
+        skip: false,
+        clause: where.length > 0 ? 'AND ' + where.join(' AND ') : '',
+        whereClause: where.length > 0 ? 'WHERE ' + where.join(' AND ') : '',
+        params,
+    };
+}
+
+function buildCourseWhere({ source_id, courses: courseFilter, semanticScope }) {
+    if (semanticScope === 'documents') {
+        return { skip: true, clause: '', whereClause: '', params: [] };
+    }
+    if (source_id && !courseFilter) {
+        return { skip: true, clause: '', whereClause: '', params: [] };
+    }
+    const ids = parseCourseIds(courseFilter);
+    if ((semanticScope === 'courses' || semanticScope === 'current-course') && ids.length === 0) {
+        return { skip: true, clause: '', whereClause: '', params: [] };
+    }
+    if (ids.length === 0) return { skip: false, clause: '', whereClause: '', params: [] };
+    const clause = `co.id IN (${ids.map(() => '?').join(',')})`;
+    return {
+        skip: false,
+        clause: 'AND ' + clause,
+        whereClause: 'WHERE ' + clause,
+        params: ids,
+    };
+}
+
+function buildDocumentWhere({ source_id, lecture, type, courses: courseFilter, semanticScope }) {
+    if (semanticScope === 'documents') {
+        return { skip: false, clause: '', whereClause: '', params: [] };
+    }
+    if (semanticScope === 'courses' || semanticScope === 'current-course') {
+        return { skip: true, clause: '', whereClause: '', params: [] };
+    }
+    const hasCourseFilter = parseCourseIds(courseFilter).length > 0;
+    return {
+        skip: Boolean(source_id || lecture || type || hasCourseFilter),
+        clause: '',
+        whereClause: '',
+        params: [],
+    };
+}
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function isRetryableEmbeddingStatus(status) {
+    return status === 408 || status === 409 || status === 425 || status === 429 || status >= 500;
+}
+
+function normalizeSemanticReindexFilters(body = {}) {
+    const scope = String(body.scope || 'all').trim();
+    if (scope === 'documents') {
+        return { semanticScope: 'documents', scopeLabel: 'Documents' };
+    }
+    if (scope === 'current-course' || scope === 'courses') {
+        const ids = parseCourseIds(body.courses || body.course_id || body.courseId);
+        if (ids.length === 0) {
+            throw new Error('Choose a course before indexing the current course.');
+        }
+        return {
+            semanticScope: scope,
+            scopeLabel: scope === 'current-course' ? 'Current course' : 'Selected courses',
+            courses: ids.join(','),
+        };
+    }
+    return { semanticScope: 'all', scopeLabel: 'Full library' };
+}
+
+async function createEmbeddings(settings, model, input) {
+    let lastError = null;
+    for (let attempt = 1; attempt <= EMBEDDING_MAX_RETRIES; attempt++) {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), EMBEDDING_REQUEST_TIMEOUT_MS);
+        try {
+            const response = await fetch(`${OPENROUTER_BASE}/embeddings`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${settings.apiKey}`,
+                    'Content-Type': 'application/json',
+                    'HTTP-Referer': 'http://localhost:5173',
+                },
+                body: JSON.stringify({
+                    model,
+                    input,
+                    encoding_format: 'float',
+                }),
+                signal: controller.signal,
+            });
+            if (!response.ok) {
+                const errText = await response.text();
+                lastError = new Error(`OpenRouter embeddings ${response.status}: ${errText.slice(0, 200)}`);
+                if (attempt < EMBEDDING_MAX_RETRIES && isRetryableEmbeddingStatus(response.status)) {
+                    await sleep(1000 * attempt);
+                    continue;
+                }
+                throw lastError;
+            }
+            const payload = await response.json();
+            return (payload.data || [])
+                .sort((a, b) => (a.index || 0) - (b.index || 0))
+                .map(item => normalizeVector(item.embedding));
+        } catch (err) {
+            lastError = err;
+            if (attempt < EMBEDDING_MAX_RETRIES) {
+                await sleep(1000 * attempt);
+                continue;
+            }
+        } finally {
+            clearTimeout(timeout);
+        }
+    }
+
+    const message = lastError?.name === 'AbortError'
+        ? `OpenRouter embeddings timed out after ${EMBEDDING_REQUEST_TIMEOUT_MS / 1000}s`
+        : (lastError?.message || 'OpenRouter embeddings failed');
+    throw new Error(`OpenRouter embeddings failed after ${EMBEDDING_MAX_RETRIES} attempts: ${message}`);
+}
+
+async function upsertSemanticEmbeddings(db, settings, model, rows) {
+    const cleanRows = [];
+    const seen = new Set();
+    const existingEmbedding = db.prepare(`
+        SELECT text_hash
+        FROM semantic_embeddings
+        WHERE content_type = ?
+          AND chunk_id = ?
+          AND model = ?
+    `);
+    for (const row of rows) {
+        if (!row?.chunk_text) continue;
+        const key = `${row.content_type}:${row.chunk_id}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const textHash = hashText(row.chunk_text);
+        const existing = existingEmbedding.get(row.content_type, row.chunk_id, model);
+        if (existing?.text_hash === textHash) continue;
+        cleanRows.push({ ...row, text_hash: textHash });
+    }
+    if (cleanRows.length === 0) return 0;
+
+    const upsert = db.prepare(`
+        INSERT INTO semantic_embeddings
+          (content_type, chunk_id, model, text_hash, dimension, embedding_json, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+        ON CONFLICT(content_type, chunk_id, model) DO UPDATE SET
+          text_hash = excluded.text_hash,
+          dimension = excluded.dimension,
+          embedding_json = excluded.embedding_json,
+          updated_at = datetime('now')
+    `);
+    const writeBatch = db.transaction((items) => {
+        for (const item of items) {
+            upsert.run(
+                item.row.content_type,
+                item.row.chunk_id,
+                model,
+                item.row.text_hash,
+                item.embedding.length,
+                JSON.stringify(item.embedding)
+            );
+        }
+    });
+
+    let indexed = 0;
+    for (let i = 0; i < cleanRows.length; i += SEMANTIC_BATCH_SIZE) {
+        const batch = cleanRows.slice(i, i + SEMANTIC_BATCH_SIZE);
+        const vectors = await createEmbeddings(settings, model, batch.map(row => row.chunk_text.slice(0, 8000)));
+        const items = [];
+        for (let j = 0; j < batch.length; j++) {
+            if (vectors[j]) items.push({ row: batch[j], embedding: vectors[j] });
+        }
+        if (items.length > 0) {
+            writeBatch(items);
+            indexed += items.length;
+        }
+    }
+    return indexed;
+}
+
+function getMissingSemanticRows(db, model, filters, limit = SEMANTIC_BATCH_SIZE) {
+    const rows = [];
+    const document = buildDocumentWhere(filters);
+    const documentLimit = Math.max(0, limit - rows.length);
+    if (!document.skip && documentLimit > 0) {
+        rows.push(...db.prepare(`
+            SELECT 'document' AS content_type, ldc.id AS chunk_id, ldc.content AS chunk_text
+            FROM library_document_chunks ldc
+            WHERE NOT EXISTS (
+                SELECT 1 FROM semantic_embeddings e
+                WHERE e.content_type = 'document'
+                  AND e.chunk_id = ldc.id
+                  AND e.model = ?
+            )
+            ORDER BY ldc.id
+            LIMIT ?
+        `).all(model, documentLimit));
+    }
+
+    const transcript = buildTranscriptWhere(filters);
+    const transcriptLimit = Math.max(0, limit - rows.length);
+    if (!transcript.skip && transcriptLimit > 0) {
+        rows.push(...db.prepare(`
+            SELECT 'transcript' AS content_type, c.id AS chunk_id, c.chunk_text
+            FROM chunks c
+            JOIN transcripts t ON c.transcript_id = t.id
+            WHERE NOT EXISTS (
+                SELECT 1 FROM semantic_embeddings e
+                WHERE e.content_type = 'transcript'
+                  AND e.chunk_id = c.id
+                  AND e.model = ?
+            )
+            ${transcript.clause}
+            ORDER BY c.id
+            LIMIT ?
+        `).all(model, ...transcript.params, transcriptLimit));
+    }
+
+    const course = buildCourseWhere(filters);
+    const courseLimit = Math.max(0, limit - rows.length);
+    if (!course.skip && courseLimit > 0) {
+        rows.push(...db.prepare(`
+            SELECT 'course' AS content_type, cc.id AS chunk_id, cc.content AS chunk_text
+            FROM course_chunks cc
+            JOIN course_lectures cl ON cc.lecture_id = cl.id
+            JOIN courses co ON cl.course_id = co.id
+            WHERE NOT EXISTS (
+                SELECT 1 FROM semantic_embeddings e
+                WHERE e.content_type = 'course'
+                  AND e.chunk_id = cc.id
+                  AND e.model = ?
+            )
+            ${course.clause}
+            ORDER BY cc.id
+            LIMIT ?
+        `).all(model, ...course.params, courseLimit));
+    }
+
+    return rows;
+}
+
+function getStaleSemanticRows(db, model, filters, limit = SEMANTIC_BATCH_SIZE) {
+    const rows = [];
+    const transcript = buildTranscriptWhere(filters);
+    if (!transcript.skip) {
+        const transcriptRows = db.prepare(`
+            SELECT 'transcript' AS content_type, c.id AS chunk_id, c.chunk_text, e.text_hash
+            FROM semantic_embeddings e
+            JOIN chunks c ON c.id = e.chunk_id
+            JOIN transcripts t ON c.transcript_id = t.id
+            WHERE e.content_type = 'transcript'
+              AND e.model = ?
+            ${transcript.clause}
+            ORDER BY e.updated_at ASC
+            LIMIT 500
+        `).all(model, ...transcript.params);
+        for (const row of transcriptRows) {
+            if (rows.length >= limit) break;
+            if (row.text_hash !== hashText(row.chunk_text)) rows.push(row);
+        }
+    }
+
+    const course = buildCourseWhere(filters);
+    if (!course.skip && rows.length < limit) {
+        const courseRows = db.prepare(`
+            SELECT 'course' AS content_type, cc.id AS chunk_id, cc.content AS chunk_text, e.text_hash
+            FROM semantic_embeddings e
+            JOIN course_chunks cc ON cc.id = e.chunk_id
+            JOIN course_lectures cl ON cc.lecture_id = cl.id
+            JOIN courses co ON cl.course_id = co.id
+            WHERE e.content_type = 'course'
+              AND e.model = ?
+            ${course.clause}
+            ORDER BY e.updated_at ASC
+            LIMIT 500
+        `).all(model, ...course.params);
+        for (const row of courseRows) {
+            if (rows.length >= limit) break;
+            if (row.text_hash !== hashText(row.chunk_text)) rows.push(row);
+        }
+    }
+
+    const document = buildDocumentWhere(filters);
+    if (!document.skip && rows.length < limit) {
+        const documentRows = db.prepare(`
+            SELECT 'document' AS content_type, ldc.id AS chunk_id, ldc.content AS chunk_text, e.text_hash
+            FROM semantic_embeddings e
+            JOIN library_document_chunks ldc ON ldc.id = e.chunk_id
+            WHERE e.content_type = 'document'
+              AND e.model = ?
+            ORDER BY e.updated_at ASC
+            LIMIT 500
+        `).all(model);
+        for (const row of documentRows) {
+            if (rows.length >= limit) break;
+            if (row.text_hash !== hashText(row.chunk_text)) rows.push(row);
+        }
+    }
+
+    return rows;
+}
+
+function getSemanticStatus(db, model, filters = {}) {
+    let total = 0;
+    const indexedRows = [];
+
+    const transcript = buildTranscriptWhere(filters);
+    if (!transcript.skip) {
+        total += db.prepare(`
+            SELECT COUNT(*) AS n
+            FROM chunks c
+            JOIN transcripts t ON c.transcript_id = t.id
+            ${transcript.whereClause}
+        `).get(...transcript.params).n;
+        indexedRows.push(...db.prepare(`
+            SELECT 'transcript' AS content_type, c.id AS chunk_id, c.chunk_text, e.text_hash
+            FROM semantic_embeddings e
+            JOIN chunks c ON c.id = e.chunk_id
+            JOIN transcripts t ON c.transcript_id = t.id
+            WHERE e.content_type = 'transcript'
+              AND e.model = ?
+            ${transcript.clause}
+        `).all(model, ...transcript.params));
+    }
+
+    const course = buildCourseWhere(filters);
+    if (!course.skip) {
+        total += db.prepare(`
+            SELECT COUNT(*) AS n
+            FROM course_chunks cc
+            JOIN course_lectures cl ON cc.lecture_id = cl.id
+            JOIN courses co ON cl.course_id = co.id
+            ${course.whereClause}
+        `).get(...course.params).n;
+        indexedRows.push(...db.prepare(`
+            SELECT 'course' AS content_type, cc.id AS chunk_id, cc.content AS chunk_text, e.text_hash
+            FROM semantic_embeddings e
+            JOIN course_chunks cc ON cc.id = e.chunk_id
+            JOIN course_lectures cl ON cc.lecture_id = cl.id
+            JOIN courses co ON cl.course_id = co.id
+            WHERE e.content_type = 'course'
+              AND e.model = ?
+            ${course.clause}
+        `).all(model, ...course.params));
+    }
+
+    const document = buildDocumentWhere(filters);
+    if (!document.skip) {
+        total += db.prepare('SELECT COUNT(*) AS n FROM library_document_chunks').get().n;
+        indexedRows.push(...db.prepare(`
+            SELECT 'document' AS content_type, ldc.id AS chunk_id, ldc.content AS chunk_text, e.text_hash
+            FROM semantic_embeddings e
+            JOIN library_document_chunks ldc ON ldc.id = e.chunk_id
+            WHERE e.content_type = 'document'
+              AND e.model = ?
+        `).all(model));
+    }
+
+    const fresh = indexedRows.filter(row => row.text_hash === hashText(row.chunk_text)).length;
+    return {
+        scope: filters.semanticScope || 'all',
+        scopeLabel: filters.scopeLabel || 'Full library',
+        model,
+        totalChunks: total,
+        indexedChunks: fresh,
+        missingChunks: Math.max(0, total - fresh),
+        staleChunks: Math.max(0, indexedRows.length - fresh),
+    };
+}
+
+async function retrieveSemanticContext(db, settings, question, filters) {
+    const model = getEmbeddingModel(settings);
+    const [queryVector] = await createEmbeddings(settings, model, question.slice(0, 8000));
+    if (!queryVector) return [];
+
+    const transcript = buildTranscriptWhere(filters);
+    const transcriptRows = transcript.skip ? [] : db.prepare(`
+        SELECT 'transcript' AS content_type, c.id AS chunk_id, c.chunk_text,
+               t.id AS target_id, c.start_timestamp, t.lecture, t.filename, t.lecture_date,
+               e.embedding_json, e.text_hash
+        FROM semantic_embeddings e
+        JOIN chunks c ON c.id = e.chunk_id
+        JOIN transcripts t ON c.transcript_id = t.id
+        WHERE e.content_type = 'transcript'
+          AND e.model = ?
+        ${transcript.clause}
+    `).all(model, ...transcript.params);
+
+    const course = buildCourseWhere(filters);
+    const courseRows = course.skip ? [] : db.prepare(`
+        SELECT 'course' AS content_type, cc.id AS chunk_id, cc.content AS chunk_text,
+               cl.id AS target_id, NULL AS start_timestamp, cl.title AS lecture, co.title AS filename,
+               NULL AS lecture_date, e.embedding_json, e.text_hash
+        FROM semantic_embeddings e
+        JOIN course_chunks cc ON cc.id = e.chunk_id
+        JOIN course_lectures cl ON cc.lecture_id = cl.id
+        JOIN courses co ON cl.course_id = co.id
+        WHERE e.content_type = 'course'
+          AND e.model = ?
+        ${course.clause}
+    `).all(model, ...course.params);
+
+    const document = buildDocumentWhere(filters);
+    const documentRows = document.skip ? [] : db.prepare(`
+        SELECT 'document' AS content_type, ldc.id AS chunk_id, ldc.content AS chunk_text,
+               ld.id AS target_id, NULL AS start_timestamp, ld.title AS lecture, ld.file_path AS filename,
+               NULL AS lecture_date, e.embedding_json, e.text_hash
+        FROM semantic_embeddings e
+        JOIN library_document_chunks ldc ON ldc.id = e.chunk_id
+        JOIN library_documents ld ON ld.id = ldc.document_id
+        WHERE e.content_type = 'document'
+          AND e.model = ?
+    `).all(model);
+
+    return [...transcriptRows, ...courseRows, ...documentRows]
+        .map(row => {
+            if (row.text_hash !== hashText(row.chunk_text)) return null;
+            let vector;
+            try {
+                vector = normalizeVector(JSON.parse(row.embedding_json));
+            } catch {
+                vector = null;
+            }
+            const semantic_score = cosineSimilarity(queryVector, vector);
+            if (!semantic_score || semantic_score < 0.15) return null;
+            return {
+                ...row,
+                source_type: row.content_type,
+                semantic_score,
+                rank: Number.POSITIVE_INFINITY,
+            };
+        })
+        .filter(Boolean)
+        .sort((a, b) => b.semantic_score - a.semantic_score)
+        .slice(0, SEMANTIC_CONTEXT_LIMIT);
+}
+
+function mergeContextChunks(lexicalChunks, semanticChunks) {
+    const byKey = new Map();
+    lexicalChunks.forEach((chunk, index) => {
+        const key = `${chunk.content_type}:${chunk.chunk_id}`;
+        byKey.set(key, {
+            ...chunk,
+            lexical_score: 1 - (index / Math.max(lexicalChunks.length, 1)),
+            semantic_score: 0,
+        });
+    });
+    semanticChunks.forEach(chunk => {
+        const key = `${chunk.content_type}:${chunk.chunk_id}`;
+        const current = byKey.get(key) || { ...chunk, lexical_score: 0 };
+        current.semantic_score = Math.max(current.semantic_score || 0, chunk.semantic_score || 0);
+        byKey.set(key, current);
+    });
+
+    return [...byKey.values()]
+        .map(chunk => ({
+            ...chunk,
+            hybrid_score: (chunk.semantic_score || 0) * 0.65 + (chunk.lexical_score || 0) * 0.35,
+        }))
+        .sort((a, b) => b.hybrid_score - a.hybrid_score)
+        .slice(0, 14);
+}
+
+function contextSourcesForClient(chunks) {
+    return chunks.map((chunk, index) => {
+        const sourceType = chunk.source_type || chunk.content_type;
+        const targetId = chunk.target_id;
+        if (!sourceType || !targetId) return null;
+        return {
+            number: index + 1,
+            type: sourceType,
+            id: targetId,
+            title: chunk.lecture || 'Untitled',
+            subtitle: chunk.filename || '',
+            timestamp: chunk.start_timestamp || '',
+            chunks: 1,
+        };
+    }).filter(Boolean);
+}
+
+// GET /api/ai/semantic/status — local semantic index coverage
+app.get('/api/ai/semantic/status', (req, res) => {
+    const settings = loadSettings();
+    const db = getDb();
+    res.json(getSemanticStatus(db, getEmbeddingModel(settings)));
+});
+
+// POST /api/ai/semantic/reindex — SSE backfill for semantic embeddings
+app.post('/api/ai/semantic/reindex', async (req, res) => {
+    const settings = loadSettings();
+    if (!settings.apiKey) {
+        return res.status(400).json({ error: 'No API key configured. Open settings to add your OpenRouter key.' });
+    }
+
+    const db = getDb();
+    const model = getEmbeddingModel(settings);
+    let filters;
+    try {
+        filters = normalizeSemanticReindexFilters(req.body || {});
+    } catch (err) {
+        return res.status(400).json({ error: err.message });
+    }
+    let cancelled = false;
+    let completed = false;
+
+    res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+    });
+    res.on('close', () => {
+        if (!completed) cancelled = true;
+    });
+    const writeEvent = (event) => {
+        if (cancelled || res.destroyed || res.writableEnded) return false;
+        res.write(`data: ${JSON.stringify(event)}\n\n`);
+        return true;
+    };
+
+    try {
+        let status = getSemanticStatus(db, model, filters);
+        if (!writeEvent({ type: 'status', ...status })) return;
+
+        while (!cancelled && status.missingChunks > 0) {
+            const rows = [
+                ...getStaleSemanticRows(db, model, filters, SEMANTIC_BATCH_SIZE),
+                ...getMissingSemanticRows(db, model, filters, SEMANTIC_BATCH_SIZE),
+            ].slice(0, SEMANTIC_BATCH_SIZE);
+            if (rows.length === 0) break;
+            const indexed = await upsertSemanticEmbeddings(db, settings, model, rows);
+            status = getSemanticStatus(db, model, filters);
+            if (!writeEvent({ type: 'progress', indexed, ...status })) return;
+        }
+
+        if (!cancelled) {
+            completed = true;
+            writeEvent({ type: 'done', ...getSemanticStatus(db, model, filters) });
+            res.end();
+        }
+    } catch (err) {
+        console.error('Semantic reindex failed:', err.message);
+        if (!cancelled) {
+            completed = true;
+            writeEvent({ type: 'error', message: err.message });
+            res.end();
+        }
+    }
+});
+
 // POST /api/ai/ask — RAG: FTS5 context retrieval + OpenRouter LLM stream
 app.post('/api/ai/ask', async (req, res) => {
     const settings = loadSettings();
@@ -531,6 +1314,8 @@ app.post('/api/ai/ask', async (req, res) => {
     const words = question.trim().split(/\s+/).filter(w => w.length > 2 && !stopWords.has(w.toLowerCase()));
     const ftsQuery = words.map(w => `"${w.replace(/"/g, '')}"`).join(' OR ');
 
+    const filters = { source_id, lecture, type, courses: courseFilter };
+
     // Step 2a: Retrieve transcript context chunks via FTS5
     let contextChunks = [];
     if (ftsQuery.length > 0) {
@@ -545,7 +1330,9 @@ app.post('/api/ai/ask', async (req, res) => {
 
         try {
             contextChunks = db.prepare(`
-                SELECT c.chunk_text, c.start_timestamp,
+                SELECT 'transcript' AS content_type, c.id AS chunk_id,
+                       c.chunk_text, c.start_timestamp,
+                       t.id AS target_id,
                        t.lecture, t.filename, t.lecture_date,
                        rank, 'transcript' as source_type
                 FROM chunks_fts
@@ -560,7 +1347,9 @@ app.post('/api/ai/ask', async (req, res) => {
             const simpler = words.slice(0, 3).map(w => `"${w}"`).join(' OR ');
             try {
                 contextChunks = db.prepare(`
-                    SELECT c.chunk_text, c.start_timestamp,
+                    SELECT 'transcript' AS content_type, c.id AS chunk_id,
+                           c.chunk_text, c.start_timestamp,
+                           t.id AS target_id,
                            t.lecture, t.filename, t.lecture_date,
                            rank, 'transcript' as source_type
                     FROM chunks_fts
@@ -593,7 +1382,9 @@ app.post('/api/ai/ask', async (req, res) => {
 
         try {
             courseContextChunks = db.prepare(`
-                SELECT cc.content as chunk_text,
+                SELECT 'course' AS content_type, cc.id AS chunk_id,
+                       cc.content as chunk_text,
+                       cl.id AS target_id,
                        cl.title as lecture, co.title as filename,
                        NULL as start_timestamp, NULL as lecture_date,
                        rank, 'course' as source_type
@@ -609,28 +1400,66 @@ app.post('/api/ai/ask', async (req, res) => {
         } catch (e) { /* no course context */ }
     }
 
-    // Merge all context, interleaved by rank
-    const allContext = [...contextChunks, ...courseContextChunks].sort((a, b) => a.rank - b.rank).slice(0, 14);
+    // Step 2c: Retrieve global library documents via FTS5 when no course/source
+    // scope is active. These docs are reference material, not lecture content.
+    let documentContextChunks = [];
+    const document = buildDocumentWhere(filters);
+    if (ftsQuery.length > 0 && !document.skip) {
+        try {
+            documentContextChunks = db.prepare(`
+                SELECT 'document' AS content_type, ldc.id AS chunk_id,
+                       ldc.content as chunk_text,
+                       ld.id AS target_id,
+                       ld.title as lecture, ld.file_path as filename,
+                       NULL as start_timestamp, NULL as lecture_date,
+                       rank, 'document' as source_type
+                FROM library_document_chunks_fts
+                JOIN library_document_chunks ldc ON ldc.id = library_document_chunks_fts.rowid
+                JOIN library_documents ld ON ld.id = ldc.document_id
+                WHERE library_document_chunks_fts MATCH ?
+                ORDER BY rank
+                LIMIT 6
+            `).all(ftsQuery);
+        } catch (e) { /* no document context */ }
+    }
+
+    const lexicalContext = [...contextChunks, ...courseContextChunks, ...documentContextChunks]
+        .sort((a, b) => a.rank - b.rank)
+        .slice(0, 14);
+
+    // Step 2d: Semantic retrieval. FTS candidates are embedded immediately so
+    // hybrid ranking improves the current answer, while the broader semantic
+    // search uses whatever has already been cached by the semantic indexer.
+    let semanticContextChunks = [];
+    try {
+        const embeddingModel = getEmbeddingModel(settings);
+        await upsertSemanticEmbeddings(db, settings, embeddingModel, lexicalContext);
+        semanticContextChunks = await retrieveSemanticContext(db, settings, question, filters);
+    } catch (err) {
+        console.warn('Semantic retrieval unavailable; falling back to FTS context:', err.message);
+    }
+
+    const allContext = mergeContextChunks(lexicalContext, semanticContextChunks);
 
     // Step 3: Build the prompt with context
     const contextText = allContext.map((ch, i) => {
-        const typeLabel = ch.source_type === 'course' ? 'Course' : 'Transcript';
+        const typeLabel = ch.source_type === 'course' ? 'Course' : ch.source_type === 'document' ? 'Document' : 'Transcript';
         const header = `[${typeLabel} Source ${i + 1}: "${ch.lecture}" — ${ch.filename}${ch.start_timestamp ? ` @ ${ch.start_timestamp}` : ''}${ch.lecture_date ? ` (${ch.lecture_date})` : ''}]`;
         return `${header}\n${ch.chunk_text.slice(0, 2000)}`;
     }).join('\n\n---\n\n');
 
-    const systemPrompt = `You are a research assistant helping a user search through a collection of publishing summit transcripts and Teachable course content from Future Fiction Academy. The content includes weekly workshop transcripts covering topics like business structures, LLC formation, genre research, pen names, AI writing tools, Claude/MCPs, Storm Chaser Method, Series Architect, newsletters, and more — as well as course materials from Teachable.
+    const systemPrompt = `You are a research assistant helping a user search through a collection of publishing summit transcripts, Teachable course content, and local reference documents from Future Fiction Academy. The content includes weekly workshop transcripts covering topics like business structures, LLC formation, genre research, pen names, AI writing tools, Claude/MCPs, Storm Chaser Method, Series Architect, newsletters, and more — as well as course materials from Teachable and local Markdown guides.
 
 When answering:
 - Base your answers ONLY on the provided excerpts
 - Include as much direct information from the source material as possible — quote or closely paraphrase rather than summarize
-- Cite specific lectures, courses, and timestamps when referencing material
+- Cite material with clickable source links in this exact format: [Source N](source:N). Use the source number from the excerpt header, such as [Source 3](source:3). Do not cite bare source numbers.
 - If the excerpts don't contain enough information to fully answer, say so clearly
 - Format your response however best fits the content — use the user's instructions for formatting preferences`;
 
     const userMessage = allContext.length > 0
-        ? `Based on the following transcript and course excerpts, please answer this question:\n\n**Question:** ${question}\n\n---\n\n${contextText}`
-        : `I couldn't find specific excerpts matching your question. Please answer based on general knowledge, but note that no matching content was found.\n\n**Question:** ${question}`;
+        ? `Based on the following transcript, course, and document excerpts, please answer this question:\n\n**Question:** ${question}\n\n---\n\n${contextText}`
+        : `No matching transcript, course, or document excerpts were found for this question. Tell the user that the local library did not provide enough context to answer.\n\n**Question:** ${question}`;
 
     // Step 4: Stream to OpenRouter
     try {
@@ -665,7 +1494,11 @@ When answering:
         res.setHeader('Connection', 'keep-alive');
 
         // Send context info first
-        res.write(`data: ${JSON.stringify({ type: 'context', chunks: contextChunks.length })}\n\n`);
+        res.write(`data: ${JSON.stringify({
+            type: 'context',
+            chunks: allContext.length,
+            sources: contextSourcesForClient(allContext),
+        })}\n\n`);
 
         const reader = orResponse.body.getReader();
         const decoder = new TextDecoder();
@@ -923,7 +1756,7 @@ app.get('/api/courses/available', async (req, res) => {
 
 app.post('/api/courses/scrape', async (req, res) => {
     const { url, forceRefresh = false } = req.body;
-    if (!url) return res.status(400).json({ error: 'Course URL is required' });
+    if (!url || !String(url).trim()) return res.status(400).json({ error: 'Course URL is required' });
     if (!hasSession()) return res.status(401).json({ error: 'Not logged in. Please log in first.' });
 
     res.writeHead(200, {
@@ -933,7 +1766,7 @@ app.post('/api/courses/scrape', async (req, res) => {
     });
 
     try {
-        const result = await scrapeCourse(url, (message, pct) => {
+        const result = await scrapeCourse(String(url).trim(), (message, pct) => {
             res.write(`data: ${JSON.stringify({ message, pct })}\n\n`);
         }, { forceRefresh });
         res.write(`data: ${JSON.stringify({ done: true, ...result })}\n\n`);
