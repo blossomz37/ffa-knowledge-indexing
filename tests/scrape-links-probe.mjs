@@ -78,12 +78,14 @@ function countWords(text) {
   return cleanText(text).split(/\s+/).filter(Boolean).length;
 }
 
-function normalizeCoursePreviewUrl(href) {
+function normalizeCourseLessonPreviewUrl(href) {
   try {
     const url = new URL(href);
     if (url.hostname !== 'future-fiction-academy.teachable.com') return null;
-    if (!url.pathname.includes('/courses/')) return null;
+    const match = url.pathname.match(/^\/admin-app\/courses\/(\d+)\/curriculum\/lessons\/(\d+)$/);
+    if (!match) return null;
     url.hash = '';
+    url.search = '';
     url.searchParams.set('preview', 'logged_in');
     return url.href;
   } catch {
@@ -245,7 +247,7 @@ async function scrapePage(browser, url, index, cookies) {
   const completedAt = new Date().toISOString();
   const courseLinks = [...new Set(
     (extracted.anchors || [])
-      .map(anchor => normalizeCoursePreviewUrl(anchor.href))
+      .map(anchor => normalizeCourseLessonPreviewUrl(anchor.href))
       .filter(Boolean)
   )];
 
@@ -307,7 +309,7 @@ try {
   }
   for (let i = 0; i < queued.length && summaries.length < maxPages; i++) {
     const currentUrl = queued[i];
-    const normalizedSeenKey = normalizeCoursePreviewUrl(currentUrl) || currentUrl;
+    const normalizedSeenKey = normalizeCourseLessonPreviewUrl(currentUrl) || currentUrl;
     if (seen.has(normalizedSeenKey)) continue;
     seen.add(normalizedSeenKey);
 
@@ -369,7 +371,7 @@ const lines = [
   '',
   '- `best` text uses downloaded `.txt` transcript content when available; otherwise it uses visible page text.',
   '- Each URL has `.txt`, `.json`, and `.png` artifacts in this folder.',
-  '- `--drill-courses` queues discovered same-site Teachable links whose path contains `/courses/`, normalized with `preview=logged_in`.',
+  '- `--drill-courses` queues discovered Teachable admin lesson links matching `/admin-app/courses/{courseId}/curriculum/lessons/{lessonId}`, normalized with `preview=logged_in`.',
 ];
 fs.writeFileSync(path.join(outDir, 'README.md'), lines.join('\n'), 'utf8');
 
