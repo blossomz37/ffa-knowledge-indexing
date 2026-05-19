@@ -12,8 +12,8 @@ Branch state at session start:
 
 ## Documents produced this session
 
-- `docs/implementation-plan_branch-convergence_v1.md` — the approved plan that drove this session
-- `docs/session-2026-05-14_branch-convergence_v1.md` — this log
+- `docs/2026-05-14_07-14_implementation-plan_branch-convergence_v1.md` — the approved plan that drove this session
+- `docs/2026-05-14_07-15_session_branch-convergence_v1.md` — this log
 
 ## Key decisions
 

@@ -9,7 +9,7 @@
 **Tech Stack:** Node 22 ESM, Express 4 (existing), `fs.createReadStream` for range responses, HTML5 `<video>` element, vanilla JS, no new dependencies.
 
 **Predecessor docs:**
-- Spec: [docs/feature-plan_phase-5-6_video-player_v1.md](feature-plan_phase-5-6_video-player_v1.md)
+- Spec: [docs/2026-05-12_11-37_feature-plan_phase-5-6_video-player_v1.md](2026-05-12_11-37_feature-plan_phase-5-6_video-player_v1.md)
 - Phase 4 (merged): in-app archive flow, multi-video support, `video_local_paths` JSON column
 
 **Workflow note:** No test suite by design. Each task gets implementer subagent → spec compliance review → code quality review per the Phase 3.1 / 4 pattern.

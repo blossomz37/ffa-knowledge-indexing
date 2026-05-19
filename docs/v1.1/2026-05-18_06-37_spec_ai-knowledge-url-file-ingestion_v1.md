@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-18  
 **Status:** Implemented baseline  
-**Related plan:** [Universal Ingestion + Semantic Search Plan v1](implementation-plan_universal-ingestion-semantic-search_v1.md)
+**Related private plan:** `implementation-plan_universal-ingestion-semantic-search_v1.md` (stored locally under ignored `docs/private/`)
 
 ## Purpose
 

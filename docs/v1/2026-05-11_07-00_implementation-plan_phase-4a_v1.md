@@ -9,8 +9,8 @@
 **Tech Stack:** Node.js 22 ESM, Electron (new dependency, ^32.0.0), Express 4 (existing), `better-sqlite3-multiple-ciphers` 12.9 (existing), Vite 6 (existing — builds the renderer assets that Express serves at `/`). No test framework — verification by direct invocation per the project's existing convention.
 
 **Predecessor docs:**
-- Spec: [docs/feature-plan_phase-4_electronize_v1.md](feature-plan_phase-4_electronize_v1.md) (sub-phase 4a section)
-- Prior phase: [docs/feature-plan_local-course-archive_v5.md](feature-plan_local-course-archive_v5.md) (Phase 3.1, just shipped)
+- Spec: [docs/2026-05-11_06-58_feature-plan_phase-4_electronize_v1.md](2026-05-11_06-58_feature-plan_phase-4_electronize_v1.md) (sub-phase 4a section)
+- Prior phase: [docs/2026-05-10_12-58_feature-plan_local-course-archive_v5.md](2026-05-10_12-58_feature-plan_local-course-archive_v5.md) (Phase 3.1, just shipped)
 
 **Workflow note:** No test suite by design. Each task gets:
 1. Implementer subagent (worktree-isolated) — produces code + functional verification.

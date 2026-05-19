@@ -1,9 +1,47 @@
-# Feature plan — Phase 4: Electronize (one-click desktop app)
+# Feature plan v2 — Phase 4: Electronize (one-click desktop app)
 
 **Date:** 2026-05-11
-**Status:** Awaiting approval to start sub-phase 4a
-**Predecessor:** [feature-plan_local-course-archive_v4.md](feature-plan_local-course-archive_v4.md) (Phases 1–3), [feature-plan_local-course-archive_v5.md](feature-plan_local-course-archive_v5.md) (Phase 3.1)
+**Status:** 4a code complete on `worktree-feature+phase-4a-electron-scaffolding`; verification deferred pending Apple Developer cert (see "Tahoe / signing realization" below)
+**Predecessor:** [2026-05-11_06-58_feature-plan_phase-4_electronize_v1.md](2026-05-11_06-58_feature-plan_phase-4_electronize_v1.md) (this is v2 — Tahoe constraint added)
 **Driver:** "We need this app to run once the user clicks on start. No servers, no 'open terminal and do this'." End users — not developers — should be able to install and use the app without touching Node, npm, ffmpeg, or a terminal.
+
+## Tahoe / signing realization (added in v2)
+
+**Discovered during Phase 4a verification (2026-05-11):**
+
+macOS 26 Tahoe + npm-distributed (unsigned or ad-hoc-signed) Electron **does not initialize properly**. The binary launches but Electron's `node_init.js` does not register the `electron` module as a built-in. Result: `process.type === undefined`, `require('electron')` returns the npm package's path-string export instead of the API object, and user code immediately crashes on `app.requestSingleInstanceLock` or any other Electron API call.
+
+**Reproduced on:**
+- Electron 32.3.3, 42.0.1 (latest stable as of 2026-05-11), and nightly v44 — all fail identically
+- Boot disk (`/Users/...`) and external USB drive — same failure
+- Worktree and clean tempdir — same failure
+- With ad-hoc resigning via `codesign --force --deep --sign -` (including hardened-runtime entitlements for JIT, library-validation, dyld-environment-variables) — same failure
+- Anthropic's `Claude.app` (signed with a real Apple Developer ID) runs fine on the same machine, confirming Electron itself works on Tahoe; the failure is specific to non-Developer-ID-signed Electron binaries
+
+**Implication for v1's "code signing deferred to 4e" decision:**
+
+Originally (v1) we deferred all code signing to a future 4e sub-phase. That works fine on macOS 15 Sequoia and earlier — npm-distributed Electron's ad-hoc signature is sufficient for dev launch. **On Tahoe it is not.** Signing must be in place before Phase 4a can be verified end-to-end on a Tahoe machine.
+
+**Revised decision: Apple Developer signing is pulled into Phase 4a's prerequisites.**
+
+The four-sub-phase plan (4a–4d) is structurally unchanged. What changes:
+
+- **Phase 4a acceptance Step 2 (window opens)** is **deferred** until the dev machine has a valid Developer ID Application signing identity installed in keychain
+- **Phase 4d's `electron-builder` config** will configure signing from day one (not from "later 4e")
+- **Phase 4e** is now narrower: only notarization + auto-update + cross-platform code-signing certs for Windows (Authenticode) and Linux remain
+- All other code is unchanged
+
+**User action (parallel to development):**
+
+1. Enroll in Apple Developer Program at https://developer.apple.com/programs/enroll/ — $99/yr, individual account
+2. Wait for Apple approval (typically 24–48 hours)
+3. After approval, install a "Developer ID Application" certificate via Xcode → Settings → Accounts → Manage Certificates
+4. Verify in terminal: `security find-identity -v -p codesigning` should list `Developer ID Application: <name> (TEAMID)`
+5. Provide the TEAMID to the developer/Claude — it gets wired into electron-builder config
+
+**Development can continue in parallel.** Phase 4b (UI integration of `archive-videos`) is mostly HTTP endpoint + frontend work that is fully testable in `npm run dev` (browser-served Express). When the Developer ID lands, the same code runs unchanged inside the Electron window.
+
+---
 
 ## Goal
 

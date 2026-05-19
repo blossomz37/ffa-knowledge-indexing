@@ -107,9 +107,9 @@ No fuzzy matching. If exact-normalized doesn't hit, leave NULL.
 
 Promote and prune:
 
-- Add `docs/session-2026-05-14_branch-convergence_v1.md` summarizing this session's decisions and the migration semantics.
-- Update [feature-plan_phase-5-6_video-player_v1.md](feature-plan_phase-5-6_video-player_v1.md) if it references the old "Show transcripts" toggle.
-- The Wiki spec lives in [implementation-plan_phase-5-6_v1.md](implementation-plan_phase-5-6_v1.md) — add a "Transcript merge model" addendum noting the new FKs and the unassigned-transcripts UX.
+- Add `docs/2026-05-14_07-15_session_branch-convergence_v1.md` summarizing this session's decisions and the migration semantics.
+- Update [2026-05-12_11-37_feature-plan_phase-5-6_video-player_v1.md](2026-05-12_11-37_feature-plan_phase-5-6_video-player_v1.md) if it references the old "Show transcripts" toggle.
+- The Wiki spec lives in [2026-05-12_11-39_implementation-plan_phase-5-6_v1.md](2026-05-12_11-39_implementation-plan_phase-5-6_v1.md) — add a "Transcript merge model" addendum noting the new FKs and the unassigned-transcripts UX.
 
 No version bump of older v1–v5 plan files; they document history, not current state.
 

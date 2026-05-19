@@ -9,7 +9,7 @@
 **Tech Stack:** Node.js 22 ESM, `better-sqlite3-multiple-ciphers` 12.9 (encrypted SQLite, supports `ON CONFLICT … DO UPDATE` and `RETURNING`), Puppeteer 24, no test framework (functional verification by direct Node invocation).
 
 **Predecessor docs:**
-- Spec: [docs/feature-plan_local-course-archive_v5.md](feature-plan_local-course-archive_v5.md)
+- Spec: [docs/2026-05-10_12-58_feature-plan_local-course-archive_v5.md](2026-05-10_12-58_feature-plan_local-course-archive_v5.md)
 - Prior phase: [docs/feature-plan_local-course-archive_v4.md](feature-plan_local-course-archive_v4.md)
 
 **Workflow note:** No test suite. Each task gets:
@@ -681,7 +681,7 @@ git commit -m "Add skip-known fast path and forceRefresh option to scrapeCourse"
 
 ## Final review (holistic)
 
-After T1, T2, T3 implementer + reviewer cycles complete, dispatch one **final code review** subagent across the full diff vs `main`. Same pattern as Phase 3's final review: the reviewer takes the spec ([feature-plan_v5.md](feature-plan_local-course-archive_v5.md)) plus the diff and reports:
+After T1, T2, T3 implementer + reviewer cycles complete, dispatch one **final code review** subagent across the full diff vs `main`. Same pattern as Phase 3's final review: the reviewer takes the spec ([feature-plan_v5.md](2026-05-10_12-58_feature-plan_local-course-archive_v5.md)) plus the diff and reports:
 
 - Spec coverage gaps (any v5 requirement not implemented)
 - Important issues (correctness bugs, broken invariants, data-loss risks)
@@ -707,7 +707,7 @@ Phase 3.1 is done when ALL of these hold:
 
 ---
 
-## Self-review (against [feature-plan_v5.md](feature-plan_local-course-archive_v5.md))
+## Self-review (against [feature-plan_v5.md](2026-05-10_12-58_feature-plan_local-course-archive_v5.md))
 
 Spec coverage check:
 

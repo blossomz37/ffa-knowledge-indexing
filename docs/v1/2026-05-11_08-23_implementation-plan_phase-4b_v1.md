@@ -9,7 +9,7 @@
 **Tech Stack:** Node.js 22 ESM, Express 4 (existing SSE pattern from `/api/courses/scrape`), AbortController/AbortSignal (Node 18+), vanilla JS frontend with `EventSource` or `fetch + ReadableStream` for SSE. No new dependencies.
 
 **Predecessor docs:**
-- Spec: [docs/feature-plan_phase-4_electronize_v2.md](feature-plan_phase-4_electronize_v2.md) (Phase 4b section)
+- Spec: [docs/2026-05-11_07-32_feature-plan_phase-4_electronize_v2.md](2026-05-11_07-32_feature-plan_phase-4_electronize_v2.md) (Phase 4b section)
 - Phase 4a: `server.js` exports `startServer()`; DATA_DIR honored; electron/main.cjs created (verification deferred pending Apple Developer cert)
 
 **Testable without Electron.** All 4b work runs under `npm run dev` (browser + Node) — once Apple signing lands, the same code runs unchanged inside the Electron window.
