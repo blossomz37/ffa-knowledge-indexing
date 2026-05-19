@@ -21,6 +21,104 @@ const PROMO_TITLES = new Set([
     '🗨️ Check Out the FFA Free Community Classes, Discord, and Facebook Group',
 ]);
 
+export function parseTeachableCourseUrl(input) {
+    try {
+        const url = new URL(input, SCHOOL_URL);
+        const match = url.pathname.match(/^\/courses\/(?:enrolled\/)?([^/]+)(?:\/lectures\/(\d+))?/);
+        if (!match) return null;
+        return {
+            courseToken: match[1],
+            lectureId: match[2] || null,
+        };
+    } catch {
+        return null;
+    }
+}
+
+export function toStudentCourseUrl(input) {
+    const parsed = parseTeachableCourseUrl(input);
+    if (!parsed) return null;
+    return withLoggedInPreview(`${SCHOOL_URL}/courses/${parsed.courseToken}`);
+}
+
+export function toStudentLectureUrl(input, fallbackCourseToken = null) {
+    const parsed = parseTeachableCourseUrl(input);
+    if (parsed?.lectureId) {
+        const courseToken = isNumericCourseToken(fallbackCourseToken) ? fallbackCourseToken : parsed.courseToken;
+        return withLoggedInPreview(`${SCHOOL_URL}/courses/${courseToken}/lectures/${parsed.lectureId}`);
+    }
+
+    if (!isNumericCourseToken(fallbackCourseToken)) return null;
+    try {
+        const url = new URL(input, SCHOOL_URL);
+        const lectureMatch = url.pathname.match(/\/lectures\/(\d+)/);
+        if (!lectureMatch) return null;
+        return withLoggedInPreview(`${SCHOOL_URL}/courses/${fallbackCourseToken}/lectures/${lectureMatch[1]}`);
+    } catch {
+        return null;
+    }
+}
+
+function withLoggedInPreview(input) {
+    const url = new URL(input, SCHOOL_URL);
+    if (url.hostname === new URL(SCHOOL_URL).hostname && url.pathname.includes('/courses/')) {
+        url.searchParams.set('preview', 'logged_in');
+    }
+    return url.href;
+}
+
+function isNumericCourseToken(token) {
+    return /^\d+$/.test(String(token || ''));
+}
+
+export async function clearTeachablePreviewCookie(page) {
+    await page.deleteCookie(
+        { name: 'site_preview', url: SCHOOL_URL },
+        { name: 'site_preview', domain: new URL(SCHOOL_URL).hostname, path: '/' }
+    ).catch(() => { /* best effort */ });
+}
+
+async function resolveCourseTokenForStudentView(page, courseRef, originalUrl, onProgress) {
+    if (isNumericCourseToken(courseRef.courseToken)) return courseRef.courseToken;
+
+    onProgress('Resolving Teachable course id...', 5);
+    const sourceUrl = new URL(originalUrl, SCHOOL_URL).href;
+    await page.goto(sourceUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+
+    const resolved = await page.evaluate(() => {
+        const fedora = document.querySelector('meta#fedora-data');
+        const dataCourseId = fedora?.getAttribute('data-course-id');
+        if (dataCourseId) return dataCourseId;
+
+        const courseIdEl = document.querySelector('[data-course-id]');
+        const attrCourseId = courseIdEl?.getAttribute('data-course-id');
+        if (attrCourseId) return attrCourseId;
+
+        const canonical = document.querySelector('link[rel="canonical"]')?.href || '';
+        return canonical.match(/\/courses\/(\d+)/)?.[1] || null;
+    });
+    await clearTeachablePreviewCookie(page);
+
+    if (!resolved) {
+        throw new Error(`Could not resolve numeric Teachable course id from ${sourceUrl}`);
+    }
+    return resolved;
+}
+
+export async function assertStudentContentLoaded(page) {
+    const state = await page.evaluate(() => {
+        const fedora = document.querySelector('meta#fedora-data');
+        return {
+            preview: fedora?.getAttribute('data-preview') || null,
+            locked: !!document.querySelector('.lecture-contents-locked, .already-enrolled'),
+        };
+    }).catch(() => ({ preview: null, locked: false }));
+
+    if (state.preview === 'logged_out' || state.locked) {
+        throw new Error('Teachable loaded the public preview instead of student content. Log in again, then retry the scrape.');
+    }
+}
+
 // =============================================================================
 // Cookie / Session Management
 // =============================================================================
@@ -60,21 +158,87 @@ export function clearSession() {
 }
 
 // =============================================================================
+// Browser launch — Cloudflare-resilient
+// =============================================================================
+// Teachable sits behind Cloudflare bot protection. Puppeteer's default
+// Chrome-for-Testing + automation flags + a throwaway profile get flagged on
+// every run, so the "verify you are not a bot" wall never clears. Mitigate
+// legitimately (own account, own content): prefer the user's real installed
+// Chrome (Cloudflare trusts it far more), reuse ONE persistent profile so a
+// solved challenge / clearance cookie is remembered next time, strip the
+// automation tells, and run headful. Fall back to the bundled/default
+// Chromium when system Chrome isn't present so the packaged app still works.
+
+const REAL_CHROME_UA =
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 ' +
+    '(KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36';
+
+const PPTR_PROFILE_DIR = path.join(DATA_DIR, 'pptr-profile');
+
+function baseLaunchOptions() {
+    fs.mkdirSync(PPTR_PROFILE_DIR, { recursive: true });
+    return {
+        headless: false,
+        userDataDir: PPTR_PROFILE_DIR,
+        defaultViewport: null,
+        args: [
+            '--no-sandbox',
+            '--disable-blink-features=AutomationControlled',
+        ],
+        ignoreDefaultArgs: ['--enable-automation'],
+    };
+}
+
+// One persistent profile means login and scraping can't run concurrently
+// (Chrome locks the user-data-dir) — that's fine, the app serializes them.
+async function launchStealthBrowser(extra = {}) {
+    const opts = { ...baseLaunchOptions(), ...extra };
+    try {
+        return await puppeteer.launch({ ...opts, channel: 'chrome' });
+    } catch (err) {
+        console.warn(
+            `[scraper] system Chrome unavailable (${err.message.split('\n')[0]}); ` +
+            'falling back to bundled Chromium'
+        );
+        return await puppeteer.launch(opts);
+    }
+}
+
+async function newStealthPage(browser) {
+    const page = await browser.newPage();
+    await page.setUserAgent(REAL_CHROME_UA);
+    return page;
+}
+
+// =============================================================================
 // Browser-based Login
 // =============================================================================
 
 export async function openLoginBrowser() {
-    const browser = await puppeteer.launch({
-        headless: false,
-        defaultViewport: { width: 1200, height: 800 },
-        args: ['--no-sandbox'],
+    const browser = await launchStealthBrowser();
+
+    const page = await newStealthPage(browser);
+    // domcontentloaded + tolerate failure: Cloudflare's interstitial can stall
+    // networkidle2 or bounce the URL, which must NOT abort the login flow.
+    try {
+        await page.goto(`${SCHOOL_URL}/sign_in`, { waitUntil: 'domcontentloaded' });
+    } catch (e) {
+        console.warn(`[scraper] initial sign_in navigation: ${e.message.split('\n')[0]}`);
+    }
+
+    console.log('\n🔐 Browser opened — solve any "verify you are human" check, then log in.');
+    console.log('   The window stays open until a real session is detected (up to 5 min).\n');
+
+    // Only a genuine authenticated cookie counts as "logged in". Anonymous
+    // visitors and the Cloudflare challenge page do NOT have these, so the
+    // window no longer closes prematurely:
+    //   - signed_in === "true"  (Teachable sets "false" until you log in)
+    //   - any *_remember_me cookie (only set on an authenticated session)
+    const isAuthenticated = (cookies) => cookies.some(c => {
+        if (!c || !c.name) return false;
+        if (c.name === 'signed_in') return String(c.value) === 'true';
+        return c.name.includes('_remember_me');
     });
-
-    const page = await browser.newPage();
-    await page.goto(`${SCHOOL_URL}/sign_in`, { waitUntil: 'networkidle2' });
-
-    console.log('\n🔐 Browser opened — please log in to Teachable.');
-    console.log('   The browser will close automatically once login is detected.\n');
 
     let loggedIn = false;
     const maxWait = 300000;
@@ -83,8 +247,7 @@ export async function openLoginBrowser() {
     while (!loggedIn && (Date.now() - start) < maxWait) {
         await new Promise(r => setTimeout(r, 2000));
         try {
-            const url = page.url();
-            if (!url.includes('/sign_in') && !url.includes('/login')) {
+            if (isAuthenticated(await page.cookies())) {
                 loggedIn = true;
             }
         } catch (e) { break; }
@@ -110,13 +273,9 @@ export async function createAuthenticatedBrowser() {
     const cookies = loadCookies();
     if (!cookies) throw new Error('No session found. Please log in first.');
 
-    const browser = await puppeteer.launch({
-        headless: 'new',
-        defaultViewport: { width: 1400, height: 900 },
-        args: ['--no-sandbox'],
-    });
+    const browser = await launchStealthBrowser();
 
-    const page = await browser.newPage();
+    const page = await newStealthPage(browser);
     await page.setCookie(...cookies);
     return { browser, page };
 }
@@ -203,28 +362,38 @@ export async function fetchAvailableCourses() {
 export async function scrapeCourse(courseUrl, onProgress = () => { }, options = {}) {
     const { forceRefresh = false } = options ?? {};
     const db = getDb();
-    // Handle both /courses/<id>/... and /courses/enrolled/<id>
-    const courseMatch = courseUrl.match(/courses\/(?:enrolled\/)?(\d+)/);
-    if (!courseMatch) throw new Error('Invalid course URL — expected /courses/<id>/... or /courses/enrolled/<id>');
-    const teachableId = courseMatch[1];
-
+    // Handle /courses/<id|slug>/... and /courses/enrolled/<id|slug>.
+    // Always load the enrolled/student surface; the bare /courses/<slug>
+    // route is Teachable's public/course-preview surface for admin accounts.
+    const courseRef = parseTeachableCourseUrl(courseUrl);
+    if (!courseRef) {
+        throw new Error('Invalid course URL — expected /courses/<id-or-slug>/... or /courses/enrolled/<id-or-slug>');
+    }
     onProgress('Launching browser...', 0);
     const { browser, page } = await createAuthenticatedBrowser();
 
     try {
-        onProgress('Loading course page...', 5);
-        await page.goto(`${SCHOOL_URL}/courses/${teachableId}`, {
+        const teachableIdOrSlug = await resolveCourseTokenForStudentView(page, courseRef, courseUrl, onProgress);
+        const studentCourseUrl = withLoggedInPreview(`${SCHOOL_URL}/courses/${teachableIdOrSlug}`);
+        const entryUrl = courseRef.lectureId
+            ? withLoggedInPreview(`${SCHOOL_URL}/courses/${teachableIdOrSlug}/lectures/${courseRef.lectureId}`)
+            : studentCourseUrl;
+
+        await clearTeachablePreviewCookie(page);
+        onProgress('Loading course page as student...', 5);
+        await page.goto(entryUrl, {
             waitUntil: 'networkidle2', timeout: 30000,
         });
 
         if (page.url().includes('/sign_in') || page.url().includes('/login')) {
             throw new Error('Session expired. Please log in again.');
         }
+        await assertStudentContentLoaded(page);
 
         const courseTitle = await page.evaluate(() => {
-            const h1 = document.querySelector('h1');
             const heading = document.querySelector('.course-sidebar h2, .course-title, [class*="course-name"]');
-            return h1?.textContent?.trim() || heading?.textContent?.trim() || 'Untitled Course';
+            const h1 = document.querySelector('h1');
+            return heading?.textContent?.trim() || h1?.textContent?.trim() || 'Untitled Course';
         });
 
         // Extract class number from page title (e.g. "118 - Back to Basics... | FFA")
@@ -389,16 +558,16 @@ export async function scrapeCourse(courseUrl, onProgress = () => { }, options = 
         }
 
         // Upsert course
-        const existing = db.prepare('SELECT id FROM courses WHERE teachable_id = ?').get(teachableId);
+        const existing = db.prepare('SELECT id FROM courses WHERE teachable_id = ?').get(teachableIdOrSlug);
         let courseId;
         if (existing) {
             courseId = existing.id;
             db.prepare('UPDATE courses SET title = ?, class_number = ?, url = ?, scraped_at = ? WHERE id = ?')
-                .run(courseTitle, classNumber, courseUrl, new Date().toISOString(), courseId);
+                .run(courseTitle, classNumber, studentCourseUrl, new Date().toISOString(), courseId);
         } else {
             const result = db.prepare(
                 'INSERT INTO courses (teachable_id, title, class_number, url, scraped_at) VALUES (?, ?, ?, ?, ?)'
-            ).run(teachableId, courseTitle, classNumber, courseUrl, new Date().toISOString());
+            ).run(teachableIdOrSlug, courseTitle, classNumber, studentCourseUrl, new Date().toISOString());
             courseId = result.lastInsertRowid;
         }
 
@@ -457,6 +626,7 @@ export async function scrapeCourse(courseUrl, onProgress = () => { }, options = 
 
             for (let li = 0; li < section.lectures.length; li++) {
                 const lecture = section.lectures[li];
+                const studentLectureUrl = toStudentLectureUrl(lecture.url, teachableIdOrSlug) || lecture.url;
                 const pct = 15 + Math.round((scraped / totalLectures) * 80);
 
                 const { id: lectureId } = lectureUpsert.get(
@@ -464,7 +634,7 @@ export async function scrapeCourse(courseUrl, onProgress = () => { }, options = 
                     sectionId,
                     lecture.teachableLectureId,
                     lecture.title,
-                    lecture.url,
+                    studentLectureUrl,
                     lecture.duration,
                     li,
                     new Date().toISOString(),
@@ -486,11 +656,9 @@ export async function scrapeCourse(courseUrl, onProgress = () => { }, options = 
                 onProgress(`Scraping: ${lecture.title}`, pct);
 
                 try {
-                    const lectureUrl = lecture.url.startsWith('http')
-                        ? lecture.url
-                        : `${SCHOOL_URL}${lecture.url}`;
-
-                    await page.goto(lectureUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+                    await clearTeachablePreviewCookie(page);
+                    await page.goto(studentLectureUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+                    await assertStudentContentLoaded(page);
                     await new Promise(r => setTimeout(r, 1500));
 
                     // 0) Capture embedded video URL/provider and Notion notes URL (discovery only — no download)
@@ -743,18 +911,22 @@ export async function scrapeCourse(courseUrl, onProgress = () => { }, options = 
 export async function rescrapeLectureTranscripts(lectureId) {
     const db = getDb();
     const lecture = db.prepare(
-        'SELECT id, url FROM course_lectures WHERE id = ?'
+        `SELECT cl.id, cl.url, c.teachable_id AS course_teachable_id
+         FROM course_lectures cl
+         LEFT JOIN courses c ON c.id = cl.course_id
+         WHERE cl.id = ?`
     ).get(lectureId);
     if (!lecture) throw new Error(`No lecture with id ${lectureId}`);
     if (!lecture.url) throw new Error(`Lecture ${lectureId} has no url`);
 
-    const lectureUrl = lecture.url.startsWith('http')
-        ? lecture.url
-        : `${SCHOOL_URL}${lecture.url}`;
+    const lectureUrl = toStudentLectureUrl(lecture.url, lecture.course_teachable_id)
+        || (lecture.url.startsWith('http') ? lecture.url : `${SCHOOL_URL}${lecture.url}`);
 
     const { browser, page } = await createAuthenticatedBrowser();
     try {
+        await clearTeachablePreviewCookie(page);
         await page.goto(lectureUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+        await assertStudentContentLoaded(page);
         await new Promise(r => setTimeout(r, 1500));
 
         const segmentsRaw = await page.evaluate(() => {

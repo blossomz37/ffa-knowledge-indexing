@@ -1,7 +1,12 @@
 import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs';
-import { createAuthenticatedBrowser } from './scraper.js';
+import {
+    assertStudentContentLoaded,
+    clearTeachablePreviewCookie,
+    createAuthenticatedBrowser,
+    toStudentLectureUrl,
+} from './scraper.js';
 import { lectureDir, relativize, resolveRelative } from './media-library.js';
 import { VIDEO_PROVIDERS } from './media-providers.js';
 import { getDb } from './db.js';
@@ -11,6 +16,16 @@ const HLS_DWELL_MS = 20_000;
 const NAVIGATE_TIMEOUT_MS = 30_000;
 const FFMPEG_BIN = process.env.FFMPEG_BIN || 'ffmpeg';
 const SCHOOL_URL = process.env.TEACHABLE_SCHOOL_URL || 'https://future-fiction-academy.teachable.com';
+
+function lectureUrlForStudentView(lecture) {
+    let teachableCourseId = null;
+    if (lecture.course_id) {
+        teachableCourseId = getDb().prepare('SELECT teachable_id FROM courses WHERE id = ?')
+            .get(lecture.course_id)?.teachable_id || null;
+    }
+    return toStudentLectureUrl(lecture.url, teachableCourseId)
+        || (lecture.url.startsWith('http') ? lecture.url : `${SCHOOL_URL}${lecture.url}`);
+}
 
 export async function downloadLectureVideo(lecture, { onProgress = () => { }, force = false, signal } = {}) {
     if (lecture.video_provider !== VIDEO_PROVIDERS.HOTMART) {
@@ -46,9 +61,7 @@ export async function downloadLectureVideo(lecture, { onProgress = () => { }, fo
         } catch { /* malformed JSON — fall through and re-check */ }
     }
 
-    const lectureUrl = lecture.url.startsWith('http')
-        ? lecture.url
-        : `${SCHOOL_URL}${lecture.url}`;
+    const lectureUrl = lectureUrlForStudentView(lecture);
 
     onProgress(`Opening lecture page (${lectureUrl})...`, 0);
 
@@ -106,7 +119,9 @@ export async function downloadLectureVideo(lecture, { onProgress = () => { }, fo
 
     try {
         try {
+            await clearTeachablePreviewCookie(page);
             await page.goto(lectureUrl, { waitUntil: 'networkidle2', timeout: NAVIGATE_TIMEOUT_MS });
+            await assertStudentContentLoaded(page);
         } catch (err) {
             if (signal?.aborted) return { skipped: true, reason: 'aborted' };
             return { error: 'Navigation failed', details: err.message };
@@ -605,9 +620,7 @@ export async function reorderLectureVideosByDom(lectureId, { dryRun = false } = 
         throw new Error('video_local_paths is empty');
     }
 
-    const lectureUrl = lecture.url.startsWith('http')
-        ? lecture.url
-        : `${SCHOOL_URL}${lecture.url}`;
+    const lectureUrl = lectureUrlForStudentView(lecture);
 
     const { browser, page } = await createAuthenticatedBrowser();
     // Same frame-attribution capture downloadLectureVideo uses — walk
@@ -632,7 +645,9 @@ export async function reorderLectureVideosByDom(lectureId, { dryRun = false } = 
     });
 
     try {
+        await clearTeachablePreviewCookie(page);
         await page.goto(lectureUrl, { waitUntil: 'networkidle2', timeout: NAVIGATE_TIMEOUT_MS });
+        await assertStudentContentLoaded(page);
 
         const liveEmbedIds = await page.evaluate(() => {
             const frames = document.querySelectorAll('iframe[src*="hotmart"], iframe[src*="cf-embed"], iframe[src*="player.hotmart"]');
